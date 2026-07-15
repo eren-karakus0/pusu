@@ -53,6 +53,8 @@ enum Command {
     BracketVariants,
     /// S9: of'un parent'ı gerçek bir emir olunca çalışıyor mu?
     OnfillRealParent,
+    /// S10: oid gönderim ÖNCESİ hesaplanabiliyor mu? (ön-imzalı iptal buna bağlı)
+    OidPredict,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -668,6 +670,7 @@ async fn main() -> eyre::Result<()> {
         Command::OnfillBracket => cmd_onfill_bracket(&cli.api_url).await,
         Command::BracketVariants => cmd_bracket_variants(&cli.api_url).await,
         Command::OnfillRealParent => cmd_onfill_real_parent(&cli.api_url).await,
+        Command::OidPredict => cmd_oid_predict(&cli.api_url).await,
     }
 }
 
@@ -1008,5 +1011,134 @@ async fn cmd_onfill_real_parent(api_url: &str) -> eyre::Result<()> {
         .text()
         .await?;
     println!("{txt}");
+    Ok(())
+}
+
+/// S10 — oid gönderim ÖNCESİ hesaplanabiliyor mu?
+///
+/// Kullanıcının senaryosu buna bağlı: "15m kapanışta limit emri gir; retest
+/// gelmez de dolmazsa 15 dk sonra bana sor." Dolmayan emri iptal etmek için
+/// `cx` gerekiyor, `cx` de `oid` istiyor. oid'i gönderimden sonra öğrenirsek
+/// iptali ön-imzalayamayız — ya sunucuya imza yetkisi vereceğiz (custody,
+/// olmaz) ya da `cxa` ile o sembolün TÜM emirlerini sileceğiz (dolmuş
+/// pozisyonun bracket'ini de öldürür, olmaz).
+///
+/// keychain'de `compute_order_id(order, nonce, owner)` var: oid =
+/// SHA256(seqno || bincode(action) || account || nonce). Hepsi bizim
+/// kontrolümüzde. AMA keychain'in kolaylık fonksiyonları `commission: None`
+/// varsayıyor; bizim emirlerimizde builder code var ve o da bincode'a giriyor.
+/// Borsanın aynı oid'i ürettiğini VARSAYAMAYIZ — ölçüyoruz.
+///
+/// 1. Limit emri kur (builder code'lu), imzala, oid'i lokalde hesapla
+/// 2. Gönder, borsanın döndürdüğü oid ile karşılaştır
+/// 3. Tutuyorsa: o oid ile ön-imzalı `cx` gönder, gerçekten iptal ediyor mu?
+async fn cmd_oid_predict(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        compute_order_id, Cancel, Commission, Keypair as KcKeypair, Order, OrderItem, OrderType,
+        Signer as KcSigner, TimeInForce,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let owner = kp.pubkey();
+    println!("BTC mark: {px} | hesap: {}", owner.to_base58());
+
+    // Dolmayacak bir limit: mark'ın %20 altında alış. Book'ta bekler.
+    let limit_px = (px * 0.80 * 100.0).round() / 100.0;
+    let order = Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: limit_px,
+        size: 0.001,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::Limit {
+            tif: TimeInForce::Gtc,
+        },
+        client_id: None,
+        // Ürün kodundaki gibi: builder code iliştirilmiş.
+        commission: Some(
+            Commission::new(
+                bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                    .map_err(|e| eyre::eyre!("{e:?}"))?,
+                2,
+            )
+            .map_err(|e| eyre::eyre!("{e:?}"))?,
+        ),
+    };
+
+    let mut signer = KcSigner::new(kp);
+    let signed = signer
+        .sign_group(vec![OrderItem::Order(order.clone())], None)
+        .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+
+    // Kritik adım: oid'i GÖNDERMEDEN hesapla.
+    let tahmin = compute_order_id(&order, signed.nonce, &owner);
+    println!("\n=== 1. limit {limit_px} @ nonce {} ===", signed.nonce);
+    println!("lokalde hesaplanan oid: {}", tahmin.to_base58());
+
+    let body = serde_json::json!({
+        "actions": signed.actions, "nonce": signed.nonce,
+        "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+    });
+    let txt = reqwest::Client::new()
+        .post(format!("{api_url}/order"))
+        .json(&body)
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("borsa yaniti: {txt}");
+
+    let v: serde_json::Value = serde_json::from_str(&txt)?;
+    let gercek = v["response"]["data"]["statuses"][0]["resting"]["oid"]
+        .as_str()
+        .or_else(|| v["response"]["data"]["statuses"][0]["filled"]["oid"].as_str());
+
+    let Some(gercek) = gercek else {
+        println!("\n❌ emir dinlenmedi, oid alinamadi — test sonuçsuz");
+        return Ok(());
+    };
+
+    println!("\n=== 2. karsilastirma ===");
+    println!("borsanin oid'i:  {gercek}");
+    println!("tahmin:          {}", tahmin.to_base58());
+    if gercek != tahmin.to_base58() {
+        println!("\n❌ TUTMADI — oid ön-imzalanamaz. Fill deadline için başka yol lazım.");
+        return Ok(());
+    }
+    println!("\n✅ TUTTU — oid gönderim öncesi biliniyor, iptal ön-imzalanabilir.");
+
+    // 3. Aynı oid ile ön-imzalı iptal: gerçekten çalışıyor mu?
+    println!("\n=== 3. ön-imzalı cx deneniyor ===");
+    let signed_cx = signer
+        .sign_group(
+            vec![OrderItem::Cancel(Cancel::new("BTC-USD", tahmin))],
+            None,
+        )
+        .map_err(|e| eyre::eyre!("cx imza: {e:?}"))?;
+    let body = serde_json::json!({
+        "actions": signed_cx.actions, "nonce": signed_cx.nonce,
+        "account": signed_cx.account, "signer": signed_cx.signer, "signature": signed_cx.signature,
+    });
+    let txt = reqwest::Client::new()
+        .post(format!("{api_url}/order"))
+        .json(&body)
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("cx yaniti: {txt}");
+    if txt.contains("rejected") || txt.contains("\"ok\":false") {
+        println!("\n⚠️ oid tuttu ama cx reddedildi — sebebe bak");
+    } else {
+        println!(
+            "\n✅ ön-imzalı iptal çalışıyor: kullanıcının 'dolmazsa sor' senaryosu kurulabilir"
+        );
+    }
     Ok(())
 }
