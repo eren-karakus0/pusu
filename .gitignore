@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+
+# Spike anahtarları — staging test key'leri, asla commit edilmez
+spike-keys.json
+*-keys.json
+.env
+.env.*
+
+# Araştırma notları — ekibe raporlanana kadar lokal
+# (bulk-client'ın raporlanmamış bug'larını ve rekabet avantajı olan bulguları içeriyor)
+docs/research/
