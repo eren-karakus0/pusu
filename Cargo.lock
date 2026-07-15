@@ -1461,6 +1461,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pusu-compile"
+version = "0.1.0"
+dependencies = [
+ "bulk-keychain",
+ "pusu-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "pusu-core"
 version = "0.1.0"
 dependencies = [

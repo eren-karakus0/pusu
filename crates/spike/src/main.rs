@@ -51,6 +51,8 @@ enum Command {
     OnfillBracket,
     /// S8: bracket'i trigger'a bağlamanın çalışan yolu hangisi?
     BracketVariants,
+    /// S9: of'un parent'ı gerçek bir emir olunca çalışıyor mu?
+    OnfillRealParent,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -665,6 +667,7 @@ async fn main() -> eyre::Result<()> {
         Command::NonceAge => cmd_nonce_age(&cli.api_url).await,
         Command::OnfillBracket => cmd_onfill_bracket(&cli.api_url).await,
         Command::BracketVariants => cmd_bracket_variants(&cli.api_url).await,
+        Command::OnfillRealParent => cmd_onfill_real_parent(&cli.api_url).await,
     }
 }
 
@@ -936,5 +939,74 @@ async fn cmd_bracket_variants(api_url: &str) -> eyre::Result<()> {
         }),
     )?;
 
+    Ok(())
+}
+
+/// S9 — `of`'un parent'ı GERÇEK bir emir olunca çalışıyor mu?
+/// Watched sınıfında düz market emri gönderdiğimiz için `of` kullanabiliriz.
+/// Çalışırsa `[m, rng]`'den güvenli: market reddedilirse rng hiç kurulmaz.
+async fn cmd_onfill_real_parent(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Commission, Keypair as KcKeypair, OnFill, Order, OrderItem, OrderType, RangeOco,
+        Signer as KcSigner,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    println!("BTC mark: {px}");
+
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let mut signer = KcSigner::new(kp);
+
+    let m = OrderItem::Order(Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: 0.0,
+        size: 0.001,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::market(),
+        client_id: None,
+        commission: Some(
+            Commission::new(
+                bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                    .map_err(|e| eyre::eyre!("{e:?}"))?,
+                2,
+            )
+            .map_err(|e| eyre::eyre!("{e:?}"))?,
+        ),
+    });
+    let of = OrderItem::OnFill(OnFill {
+        p: 0,
+        actions: vec![OrderItem::RangeOco(RangeOco {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            size: 0.001,
+            collar_min: px * 0.90,
+            collar_max: px * 1.10,
+            limit_min: f64::NAN,
+            limit_max: f64::NAN,
+            iso: false,
+        })],
+    });
+
+    println!("\n=== [m, of{{p:0,[rng]}}] gonderiliyor ===");
+    let signed = signer
+        .sign_group(vec![m, of], None)
+        .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+    let body = serde_json::json!({
+        "actions": signed.actions, "nonce": signed.nonce,
+        "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+    });
+    let txt = reqwest::Client::new()
+        .post(format!("{api_url}/order"))
+        .json(&body)
+        .send()
+        .await?
+        .text()
+        .await?;
+    println!("{txt}");
     Ok(())
 }
