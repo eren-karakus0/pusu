@@ -82,14 +82,24 @@ crates/
 
 | Katman | Kütüphane | Neden |
 |---|---|---|
-| **İmzalama** | `bulk-keychain` | Kanonik. `trig`/`of`/`rng` doğru imzalıyor — Faz 0'da doğrulandı |
-| Mum kapanışı | **kendi kodumuz** (`pusu-feed`) | REST `/klines` polling. `bulk-client`'ın candle handler'ı kırık (§8.6) ve WS zaten ağır |
-| Ticker / hesap akışı | `bulk-client` | actor+watch mimarisi sağlam; canlı fiyat göstergesi ve pozisyon takibi için |
+| **İmzalama** | `bulk-keychain` | Kanonik ve sağlam. `trig`/`of`/`rng` doğru imzalıyor — Faz 0'da doğrulandı |
+| Mum kapanışı | **kendi kodumuz** (`pusu-feed`) | REST `/klines` polling. bulk-client'ın candle handler'ı kırık ve WS zaten ağır |
+| REST (hesap, emir) | **kendi kodumuz** | `get_account()` açık emir varken çöküyor (§8.8). Kendi ince client'ımızı yazıyoruz |
 | Tarayıcı imzası | `bulk-keychain-wasm` | Kullanıcı kendi anahtarıyla imzalar; sunucuda key yok |
 
-⚠️ **`bulk-client` ile İMZALAMA YAPMIYORUZ.** v0.1.2'de `Trigger` struct'ında `iso` alanı eksik → trigger basket `bad signature` alıyor. `Trailing` de aynı riski taşıyor. Ayrıca `manage_agent_wallet(account: Some(x))` sessizce kapsamlama yapmıyor. Detay: [`research/02-staging-spike.md`](research/02-staging-spike.md) §6.
+⚠️ **`bulk-client` kullanmıyoruz.** v0.1.2'de dört ayrı kırık nokta bulundu (imzalama, candle, hesap sorgusu, hata semantiği). Yalnızca `bulk-keychain`'e (imzalama) bağımlıyız; REST'i kendimiz konuşuyoruz — yüzey zaten dar (`/klines`, `/account`, `/order`). Detay: [`research/02-staging-spike.md`](research/02-staging-spike.md) §6, §8.6, §8.8
 
-⚠️ **`Ok` ≠ başarı.** `bulk-client` reddedilen emirde `Err` dönmüyor; `Ok` içinde `status: "rejectedInvalid"` dönüyor. Temel katmanda status kontrolü zorunlu — yoksa reddedilen alarmı "kuruldu" diye gösteririz.
+⚠️ **`Ok` ≠ başarı.** Borsa reddedilen emirde HTTP 200 dönüyor; sonuç `status` alanında (`rejectedInvalid`). Temel katmanda status kontrolü zorunlu — yoksa reddedilen alarmı "kuruldu" diye gösterir, kullanıcıya yalan söyleriz.
+
+### 🔒 Sınıf 1'in derleme şablonu (Faz 1'de doğrulandı)
+
+```
+trig { c, d, tr, actions: [ m{...builderCode}, rng{stop, hedef} ] }
+```
+
+Bracket'i `of` ile bağlamak **çalışmıyor**: `of`'un parent'ı trigger olamıyor (`on_fill parent not found`) ve `of` trigger'ın içine de gömülemiyor (`invalid action in trigger order`). Çalışan tek yol `rng`'yi market emrin kardeşi olarak basket'e koymak; market anında dolduğu için on-fill ile eşdeğer.
+
+⚠️ **Trigger içinde yalnızca market giriş.** `trig { actions: [l, rng] }` limit beklerken `rng`'yi hemen kurar — var olmayan pozisyonu korur. v1 kapsamı dışı.
 
 ### Domain taslağı
 

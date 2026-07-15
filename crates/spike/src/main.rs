@@ -47,6 +47,10 @@ enum Command {
     TriggerKeychain,
     /// S6: Nonce'un ömrü var mı? (ön-imzalı tx tasarımı buna bağlı)
     NonceAge,
+    /// S7: of bracket'i trigger'ın içindeki emir dolunca ateşliyor mu?
+    OnfillBracket,
+    /// S8: bracket'i trigger'a bağlamanın çalışan yolu hangisi?
+    BracketVariants,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -647,7 +651,7 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
     match cli.command {
@@ -659,6 +663,8 @@ async fn main() -> eyre::Result<()> {
         Command::TriggerKeychain => cmd_trigger_keychain(&cli.api_url).await,
         Command::AgentTransfer => cmd_agent_transfer(&cli.api_url).await,
         Command::NonceAge => cmd_nonce_age(&cli.api_url).await,
+        Command::OnfillBracket => cmd_onfill_bracket(&cli.api_url).await,
+        Command::BracketVariants => cmd_bracket_variants(&cli.api_url).await,
     }
 }
 
@@ -714,5 +720,210 @@ async fn cmd_nonce_age(api_url: &str) -> eyre::Result<()> {
             txt.chars().take(160).collect::<String>()
         );
     }
+    Ok(())
+}
+
+/// S7 — `of` bracket'i, trigger'ın İÇİNDEKİ emir dolunca ateşliyor mu?
+///
+/// Compiler'ın tamamı buna dayanacak: `of` trigger'ın içine gömülemiyor
+/// (keychain: "TriggerBasket nested actions: m, l, mod, cx, cxa, st, tp, rng"
+/// — `of` yok), o yüzden kardeş olarak [trig, of{p:0}] kurmak zorundayız.
+/// Soru: `of`'un parent'ı trig iken, trig'in içindeki market emri dolunca
+/// bracket kuruluyor mu?
+async fn cmd_onfill_bracket(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Commission, Keypair as KcKeypair, OnFill, Order, OrderItem, OrderType, RangeOco,
+        Signer as KcSigner, TriggerBasket,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let master_pk = TransactionSigner::from_private_key(&keys.master)?.public_key();
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    println!("BTC mark: {px}");
+    let acik_once = c.get_account(master_pk).await?.open_orders.len();
+    println!("acik emir (once): {acik_once}");
+
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let mut signer = KcSigner::new(kp);
+
+    let giris = OrderItem::Order(Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: 0.0,
+        size: 0.002,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::market(),
+        client_id: None,
+        commission: Some(
+            Commission::new(
+                bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                    .map_err(|e| eyre::eyre!("{e:?}"))?,
+                2,
+            )
+            .map_err(|e| eyre::eyre!("{e:?}"))?,
+        ),
+    });
+
+    // Anında tetiklenecek basket (fiyat zaten eşiğin altında)
+    let basket = OrderItem::TriggerBasket(TriggerBasket {
+        symbol: "BTC-USD".into(),
+        is_buy: false,
+        trigger_price: px * 1.05,
+        actions: vec![giris],
+        iso: false,
+    });
+
+    // Bracket: parent = index 0 (trig). Long icin stop altta, hedef ustte.
+    let bracket = OrderItem::OnFill(OnFill {
+        p: 0,
+        actions: vec![OrderItem::RangeOco(RangeOco {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            size: 0.002,
+            collar_min: px * 0.90,
+            collar_max: px * 1.10,
+            limit_min: f64::NAN,
+            limit_max: f64::NAN,
+            iso: false,
+        })],
+    });
+
+    println!("\n=== [trig, of{{p:0}}] gonderiliyor ===");
+    let signed = signer
+        .sign_group(vec![basket, bracket], None)
+        .map_err(|e| eyre::eyre!("imzalama: {e:?}"))?;
+    println!("payload:\n{}", serde_json::to_string_pretty(&signed.actions)?);
+
+    let body = serde_json::json!({
+        "actions": signed.actions, "nonce": signed.nonce,
+        "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{api_url}/order"))
+        .json(&body)
+        .send()
+        .await?;
+    println!("\nHTTP {}", resp.status());
+    println!("{}", resp.text().await?);
+
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+    println!("\n=== Sonuc ===");
+    let a = c.get_account(master_pk).await?;
+    println!("acik emir (sonra): {} (once {acik_once})", a.open_orders.len());
+    for o in a.open_orders.iter().take(8) {
+        println!("   {o:?}");
+    }
+    println!("pozisyonlar:");
+    for p in a.positions.iter() {
+        println!("   {p:?}");
+    }
+    Ok(())
+}
+
+/// S8 — Bracket'i trigger'a nasıl bağlarız? İki aday:
+///   A) trig { actions: [m, of{p:0, actions:[rng]}] }  — of gömülü (keychain izin vermiyor der)
+///   B) trig { actions: [m, rng] }                     — rng doğrudan gömülü
+async fn cmd_bracket_variants(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Commission, Keypair as KcKeypair, OnFill, Order, OrderItem, OrderType, RangeOco,
+        Signer as KcSigner, TriggerBasket,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+
+    let giris = |sz: f64| -> eyre::Result<OrderItem> {
+        Ok(OrderItem::Order(Order {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            price: 0.0,
+            size: sz,
+            reduce_only: false,
+            iso: false,
+            order_type: OrderType::market(),
+            client_id: None,
+            commission: Some(
+                Commission::new(
+                    bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                        .map_err(|e| eyre::eyre!("{e:?}"))?,
+                    2,
+                )
+                .map_err(|e| eyre::eyre!("{e:?}"))?,
+            ),
+        }))
+    };
+    let rng = |sz: f64| {
+        OrderItem::RangeOco(RangeOco {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            size: sz,
+            collar_min: px * 0.90,
+            collar_max: px * 1.10,
+            limit_min: f64::NAN,
+            limit_max: f64::NAN,
+            iso: false,
+        })
+    };
+
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let mut signer = KcSigner::new(kp);
+
+    let mut gonder = |ad: &str, item: OrderItem| -> eyre::Result<()> {
+        let signed = signer.sign(item, None).map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+        let body = serde_json::json!({
+            "actions": signed.actions, "nonce": signed.nonce,
+            "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+        });
+        let rt = tokio::runtime::Handle::current();
+        let txt = tokio::task::block_in_place(|| {
+            rt.block_on(async {
+                reqwest::Client::new()
+                    .post(format!("{api_url}/order"))
+                    .json(&body)
+                    .send()
+                    .await?
+                    .text()
+                    .await
+            })
+        })?;
+        println!("\n=== {ad} ===");
+        println!("{txt}");
+        Ok(())
+    };
+
+    // A) of, trigger'ın İÇİNE gömülü
+    gonder(
+        "A) trig { actions: [m, of{p:0,[rng]}] }",
+        OrderItem::TriggerBasket(TriggerBasket {
+            symbol: "BTC-USD".into(),
+            is_buy: false,
+            trigger_price: px * 1.05,
+            actions: vec![
+                giris(0.001)?,
+                OrderItem::OnFill(OnFill { p: 0, actions: vec![rng(0.001)] }),
+            ],
+            iso: false,
+        }),
+    )?;
+
+    // B) rng doğrudan trigger'ın içinde, market emrin kardeşi
+    gonder(
+        "B) trig { actions: [m, rng] }",
+        OrderItem::TriggerBasket(TriggerBasket {
+            symbol: "BTC-USD".into(),
+            is_buy: false,
+            trigger_price: px * 1.05,
+            actions: vec![giris(0.001)?, rng(0.001)],
+            iso: false,
+        }),
+    )?;
+
     Ok(())
 }
