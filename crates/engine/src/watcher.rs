@@ -29,7 +29,7 @@
 //! monotonluk koruması [`Snapshot::set_close`]'a taşındı.
 
 use crate::outcome::{interpret, Outcome};
-use crate::snapshot::{evaluate, Snapshot};
+use crate::snapshot::{evaluate, evidence, Snapshot};
 use pusu_core::{Alert, AlertId, AlertState, Condition, Interval, Symbol};
 use pusu_feed::{last_closed, KlineSource, MarkSource};
 use std::collections::HashSet;
@@ -65,6 +65,11 @@ pub struct Report {
 pub struct Tick {
     /// Gönderilen alarmlar ve sonuçları.
     pub fired: Vec<Report>,
+    /// Koşulu tuttu ama **çok geç görüldü** — emir gönderilmedi.
+    /// Kullanıcıya "kaçırdın, hâlâ istiyor musun?" diye sorulacak.
+    pub missed: Vec<AlertId>,
+    /// İptal koşulu sağlandı — setup bozuldu, alarm düşürüldü.
+    pub invalidated: Vec<AlertId>,
     /// Çekilemeyen feed'ler. Boş değilse bu tur eksik değerlendirildi.
     pub feed_errors: Vec<String>,
 }
@@ -90,7 +95,7 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
     pub async fn tick(&mut self, alerts: &mut [Alert], now_ms: u64) -> Tick {
         let mut tick = Tick::default();
         self.refresh(alerts, now_ms, &mut tick).await;
-        self.fire(alerts, &mut tick).await;
+        self.fire(alerts, now_ms, &mut tick).await;
         tick
     }
 
@@ -131,13 +136,39 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
     }
 
     /// Koşulu tutan alarmları gönder.
-    async fn fire(&mut self, alerts: &mut [Alert], tick: &mut Tick) {
+    async fn fire(&mut self, alerts: &mut [Alert], now_ms: u64, tick: &mut Tick) {
         for alert in alerts.iter_mut() {
             if alert.state != AlertState::Armed {
                 continue;
             }
+
+            // İptal koşulu giriş koşulundan ÖNCE bakılıyor. İkisi aynı turda
+            // sağlanırsa iptal kazanır: "10'un üstünde kapatırsa al, 9'un
+            // altına düşerse iptal et" diyen kullanıcı için mum 10.5'ten
+            // kapanıp fiyat 8.9'a çakıldıysa, setup ölmüş demektir. Kapanışa
+            // bakıp long'a girmek, kullanıcının iptal koşuluyla korunmak
+            // istediği şeyin ta kendisi olurdu.
+            if let Some(inv) = &alert.invalidate {
+                if evaluate(inv, &self.snapshot, alert.armed_at_ms) == Some(true) {
+                    alert.state = AlertState::Cancelled;
+                    tick.invalidated.push(alert.id.clone());
+                    continue;
+                }
+            }
+
             // Yalnızca Some(true). None ("bilmiyorum") ateşlemez.
             if evaluate(&alert.condition, &self.snapshot, alert.armed_at_ms) != Some(true) {
+                continue;
+            }
+
+            // Koşul tutuyor ama kanıtı çok mu eski? Watcher saatlerce düşüp
+            // geri geldiyse kural hâlâ sağlanıyor olabilir; piyasa çoktan
+            // başka yerde. Kullanıcı adına o fiyata girmiyoruz — soruyoruz.
+            let bayat = evidence(&alert.condition, &self.snapshot, alert.armed_at_ms)
+                .is_some_and(|ev| ev.is_stale(now_ms));
+            if bayat {
+                alert.state = AlertState::Missed;
+                tick.missed.push(alert.id.clone());
                 continue;
             }
 
@@ -184,6 +215,11 @@ fn ihtiyaclar(alerts: &[Alert]) -> (HashSet<(Symbol, Interval)>, HashSet<Symbol>
     let mut marks = HashSet::new();
     for a in alerts.iter().filter(|a| a.state == AlertState::Armed) {
         topla(&a.condition, &mut candles, &mut marks);
+        // İptal koşulunun feed'i unutulursa iptal hiç değerlendirilemez ve
+        // sessizce çalışmaz — kullanıcı korunduğunu sanır.
+        if let Some(inv) = &a.invalidate {
+            topla(inv, &mut candles, &mut marks);
+        }
     }
     (candles, marks)
 }
@@ -298,6 +334,7 @@ mod tests {
             id: AlertId::new("a1"),
             owner: "master".into(),
             account: "sub".into(),
+            invalidate: None,
             condition: Condition::CandleClose {
                 symbol: "BTC-USD".into(),
                 interval: Interval::H1,
@@ -428,6 +465,156 @@ mod tests {
         assert!(t.fired.is_empty());
         assert_eq!(t.feed_errors.len(), 1, "hata rapor edilmeli");
         assert_eq!(alerts[0].state, AlertState::Armed, "alarm silahlı kalmalı");
+    }
+
+    // -- iptal koşulu -------------------------------------------------------
+
+    /// Kullanıcının kendi kurgusu: "saatlik 10'un üstünde kapatırsa al;
+    /// kıramazsa ve 9'un altına düşerse iptal et."
+    fn setup_alarmi(armed: u64) -> Alert {
+        let mut a = alarm(armed);
+        a.condition = Condition::CandleClose {
+            symbol: "BTC-USD".into(),
+            interval: Interval::H1,
+            cross: Cross::Above,
+            price: 10.0,
+        };
+        a.invalidate = Some(Condition::MarkCross {
+            symbol: "BTC-USD".into(),
+            cross: Cross::Below,
+            price: 9.0,
+        });
+        a
+    }
+
+    #[tokio::test]
+    async fn setup_bozulursa_alarm_iptal_olur() {
+        // Fiyat 9'un altına düştü: setup öldü, alarm düşmeli.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 9.5)]));
+        let mut w = Watcher::new(kaynak, SahteMark(8.9), SahteBorsa::new(dolu_yanit()));
+        let mut alerts = vec![setup_alarmi(armed)];
+
+        let t = w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(t.invalidated, vec![AlertId::new("a1")]);
+        assert_eq!(alerts[0].state, AlertState::Cancelled);
+        assert_eq!(w.dispatch.sayi(), 0);
+    }
+
+    #[tokio::test]
+    async fn iptal_kosulu_giris_kosulunu_yener() {
+        // En ince hal: mum 10.5'ten kapandı (giriş sağlandı) AMA fiyat 8.9'a
+        // çakılmış (iptal de sağlandı). Kapanışa bakıp long'a girmek,
+        // kullanıcının iptal koşuluyla korunmak istediği şeyin ta kendisi.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(kaynak, SahteMark(8.9), SahteBorsa::new(dolu_yanit()));
+        let mut alerts = vec![setup_alarmi(armed)];
+
+        let t = w.tick(&mut alerts, armed + 2_000).await;
+        assert!(t.fired.is_empty(), "setup ölmüşken işleme girildi");
+        assert_eq!(alerts[0].state, AlertState::Cancelled);
+        assert_eq!(w.dispatch.sayi(), 0, "borsaya gitmemeliydi");
+    }
+
+    #[tokio::test]
+    async fn setup_ayaktayken_kosul_tutunca_normal_atesler() {
+        // Fiyat 9'un üstünde kaldı, mum 10.5'ten kapandı → işlem girmeli.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(kaynak, SahteMark(10.4), SahteBorsa::new(dolu_yanit()));
+        let mut alerts = vec![setup_alarmi(armed)];
+
+        let t = w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(t.fired.len(), 1);
+        assert!(t.invalidated.is_empty());
+        assert_eq!(alerts[0].state, AlertState::Fired);
+    }
+
+    #[tokio::test]
+    async fn iptal_kosulunun_feedi_de_cekiliyor() {
+        // İptal koşulu mark istiyor ama giriş koşulu istemiyor. Feed toplama
+        // iptali unutursa iptal sessizce hiç çalışmaz — kullanıcı korunduğunu
+        // sanar.
+        let a = setup_alarmi(0);
+        let (candles, marks) = ihtiyaclar(&[a]);
+        assert_eq!(candles.len(), 1, "giriş koşulunun mumu");
+        assert_eq!(marks.len(), 1, "iptal koşulunun mark'ı çekilmiyor");
+    }
+
+    #[test]
+    fn iptal_kosulu_olan_alarm_zincire_gomulemez() {
+        // Koşul tek başına MarkCross olsa bile: borsaya bırakılan trigger
+        // kendi kendini iptal edemez.
+        let mut a = alarm(0);
+        a.condition = Condition::MarkCross {
+            symbol: "BTC-USD".into(),
+            cross: Cross::Above,
+            price: 10.0,
+        };
+        assert!(a.execution().is_onchain(), "iptalsiz hali zincirde");
+
+        a.invalidate = Some(Condition::MarkCross {
+            symbol: "BTC-USD".into(),
+            cross: Cross::Below,
+            price: 9.0,
+        });
+        assert!(!a.execution().is_onchain(), "iptalli hali watcher'da");
+    }
+
+    // -- bayatlık -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn watcher_uzun_sure_dustuyse_gonderme_kullaniciya_sor() {
+        // Kullanıcının kuralı: saatlik alarmda pencere 1 saat. Watcher 6 saat
+        // düşüp geri geldiğinde kural hâlâ sağlanıyor ama piyasa çoktan başka
+        // yerde — o fiyata market emriyle girmek kullanıcının alarmının değil
+        // bizim gecikmemizin sonucu olurdu.
+        let armed = 9 * 3_600_000;
+        let kapanis = 10 * 3_600_000; // 10:00'da 90.500'den kapandı
+        let kaynak = SahteKline(RefCell::new(vec![mum(kapanis, 90_500.0)]));
+        let borsa = SahteBorsa::new(dolu_yanit());
+        let mut w = Watcher::new(kaynak, SahteMark(0.0), borsa);
+        let mut alerts = vec![alarm(armed)];
+
+        // Watcher 16:00'da geri geliyor — kapanışın üstünden 6 saat geçmiş.
+        let t = w.tick(&mut alerts, 16 * 3_600_000).await;
+
+        assert!(t.fired.is_empty(), "bayat kapanışla emir gönderildi");
+        assert_eq!(w.dispatch.sayi(), 0, "borsaya hiç gitmemeliydi");
+        assert_eq!(t.missed, vec![AlertId::new("a1")]);
+        assert_eq!(alerts[0].state, AlertState::Missed);
+    }
+
+    #[tokio::test]
+    async fn pencere_icinde_gecikme_normal_ateseler() {
+        // Watcher birkaç dakika gecikti — bu normal, alarm çalışmalı.
+        let armed = 9 * 3_600_000;
+        let kapanis = 10 * 3_600_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(kapanis, 90_500.0)]));
+        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut alerts = vec![alarm(armed)];
+
+        let t = w.tick(&mut alerts, kapanis + 300_000).await; // 5 dk sonra
+        assert_eq!(t.fired.len(), 1);
+        assert!(t.missed.is_empty());
+        assert_eq!(alerts[0].state, AlertState::Fired);
+    }
+
+    #[tokio::test]
+    async fn kacirilan_alarm_tekrar_denenmez() {
+        let armed = 9 * 3_600_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(10 * 3_600_000, 90_500.0)]));
+        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut alerts = vec![alarm(armed)];
+
+        w.tick(&mut alerts, 16 * 3_600_000).await;
+        assert_eq!(alerts[0].state, AlertState::Missed);
+
+        // Kullanıcı cevap verene kadar alarm sessiz kalmalı.
+        let t = w.tick(&mut alerts, 17 * 3_600_000).await;
+        assert!(t.missed.is_empty(), "aynı alarm iki kez bildirildi");
+        assert_eq!(w.dispatch.sayi(), 0);
     }
 
     #[tokio::test]

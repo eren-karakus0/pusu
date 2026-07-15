@@ -208,6 +208,7 @@ mod tests {
             owner: "master".into(),
             account: "sub".into(),
             condition,
+            invalidate: None,
             action,
             state: AlertState::Armed,
             armed_at_ms: 0,

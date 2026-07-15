@@ -88,6 +88,8 @@ pub enum WatchReason {
     CandleClose,
     /// `trig` tek eşik alıyor; çok koşullu mantık kuramıyor.
     MultipleConditions,
+    /// Alarmın bir iptal koşulu var.
+    Invalidation,
 }
 
 impl WatchReason {
@@ -100,6 +102,10 @@ impl WatchReason {
             Self::MultipleConditions => {
                 "Borsa tek eşik takip edebiliyor, birden fazla koşulu birlikte değil. \
                  Bu alarmı PUSU izliyor."
+            }
+            Self::Invalidation => {
+                "Borsaya bırakılan bir trigger kendi kendini iptal edemez; setup \
+                 bozulduğunda emri geri çekmek gerekiyor. Bu alarmı PUSU izliyor."
             }
         }
     }

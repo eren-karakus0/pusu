@@ -32,6 +32,7 @@ fn alert(condition: Condition, bracket: Option<Bracket>) -> Alert {
         owner: String::new(),
         account: String::new(),
         condition,
+        invalidate: None,
         action: AlertAction::Trade(TradeSpec {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,

@@ -95,6 +95,40 @@ impl Interval {
         }
     }
 
+    /// Periyodun süresi (ms).
+    ///
+    /// Alarmın "kaçırıldı" penceresi bu: saatlik kapanışta girmek isteyen
+    /// kullanıcı için o saat geçtiyse premis de geçmiştir. Bkz.
+    /// `pusu_engine`'deki bayatlık kontrolü.
+    ///
+    /// Ay ve hafta takvim birimi; burada 30 ve 7 gün sayılıyor. Pencere
+    /// hesabı için bu yaklaşıklık zararsız — aylık alarmda birkaç günlük
+    /// sapma kararı değiştirmiyor.
+    pub const fn duration_ms(&self) -> u64 {
+        const SN: u64 = 1_000;
+        const DK: u64 = 60 * SN;
+        const SA: u64 = 60 * DK;
+        const GN: u64 = 24 * SA;
+        match self {
+            Self::S10 => 10 * SN,
+            Self::M1 => DK,
+            Self::M3 => 3 * DK,
+            Self::M5 => 5 * DK,
+            Self::M15 => 15 * DK,
+            Self::M30 => 30 * DK,
+            Self::H1 => SA,
+            Self::H2 => 2 * SA,
+            Self::H4 => 4 * SA,
+            Self::H6 => 6 * SA,
+            Self::H8 => 8 * SA,
+            Self::H12 => 12 * SA,
+            Self::D1 => GN,
+            Self::D3 => 3 * GN,
+            Self::W1 => 7 * GN,
+            Self::Mo1 => 30 * GN,
+        }
+    }
+
     /// Kullanıcıya gösterilecek Türkçe ad.
     pub const fn label(&self) -> &'static str {
         match self {
@@ -200,5 +234,45 @@ mod tests {
         assert_eq!(Interval::H1.as_wire(), "1h");
         assert_eq!(Interval::Mo1.as_wire(), "1M");
         assert_eq!(Interval::S10.as_wire(), "10s");
+    }
+
+    #[test]
+    fn interval_sureleri_dogru() {
+        assert_eq!(Interval::H1.duration_ms(), 3_600_000);
+        assert_eq!(Interval::M15.duration_ms(), 900_000);
+        assert_eq!(Interval::S10.duration_ms(), 10_000);
+        assert_eq!(Interval::D1.duration_ms(), 86_400_000);
+    }
+
+    #[test]
+    fn interval_sureleri_artan_sirada() {
+        // Kaçırılma penceresi buna dayanıyor; sıralama bozulursa
+        // bileşik koşulda yanlış pencere seçilir.
+        let hepsi = [
+            Interval::S10,
+            Interval::M1,
+            Interval::M3,
+            Interval::M5,
+            Interval::M15,
+            Interval::M30,
+            Interval::H1,
+            Interval::H2,
+            Interval::H4,
+            Interval::H6,
+            Interval::H8,
+            Interval::H12,
+            Interval::D1,
+            Interval::D3,
+            Interval::W1,
+            Interval::Mo1,
+        ];
+        for pair in hepsi.windows(2) {
+            assert!(
+                pair[0].duration_ms() < pair[1].duration_ms(),
+                "{:?} < {:?} olmalı",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }

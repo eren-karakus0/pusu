@@ -159,6 +159,142 @@ pub fn evaluate(condition: &Condition, snap: &Snapshot, since_ms: u64) -> Option
     }
 }
 
+/// Sağlanmış bir koşulun kanıtı — "neye dayanarak ateşliyoruz?"
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Evidence {
+    /// Zamana bağlı olmayan kanıt (mark price). Hep taze.
+    Fresh,
+    /// Belirli bir anda oluşmuş kanıt (mum kapanışı) ve geçerlilik penceresi.
+    At { at_ms: u64, window_ms: u64 },
+}
+
+impl Evidence {
+    /// Kanıt penceresi dolmuş mu? Dolduysa alarm "kaçırıldı" sayılır.
+    pub const fn is_stale(&self, now_ms: u64) -> bool {
+        match self {
+            Self::Fresh => false,
+            Self::At { at_ms, window_ms } => now_ms > *at_ms + *window_ms,
+        }
+    }
+}
+
+/// Sağlanmış koşulun kanıtını çıkar. `None` = koşul sağlanmıyor.
+///
+/// # `All` ile `Any` neden ters çalışıyor
+///
+/// **`All`**: her bacağın kanıtı hâlâ geçerli olmalı → **en eskisi bağlar**.
+/// "BTC 1h > 90k ve ETH 1h > 3k" koşulunda BTC'nin kanıtı 06:00'dan, ETH'ninki
+/// 11:00'den geliyorsa, koşul 11:00'de sağlanmış görünür ama BTC beş saatlik
+/// bayat veriye dayanıyor — bu arada 70k'ya inmiş olabilir. En eski bacağı
+/// ölçmek aynı zamanda "bir feed'im donmuş" halini de yakalıyor: sağlıklı bir
+/// watcher'da aynı periyottaki tüm bacakların kanıtı aynı andan gelir.
+///
+/// **`Any`**: tek bir bacağın sağlanması yetiyor → **en yenisi bağlar**. Biri
+/// az önce sağlandıysa ateşleme haklı; diğer bacağın eski olması önemsiz.
+///
+/// Pencere her iki halde de bacakların **en kısa periyodu**: en sıkı zaman
+/// dilimi aciliyeti belirler.
+pub fn evidence(condition: &Condition, snap: &Snapshot, since_ms: u64) -> Option<Evidence> {
+    match condition {
+        Condition::MarkCross {
+            symbol,
+            cross,
+            price,
+        } => snap
+            .mark(symbol)
+            .filter(|m| cross.is_met(*m, *price))
+            .map(|_| Evidence::Fresh),
+
+        Condition::CandleClose {
+            symbol,
+            interval,
+            cross,
+            price,
+        } => snap
+            .closes
+            .get(&(symbol.clone(), *interval))
+            .filter(|c| c.at_ms > since_ms && cross.is_met(c.price, *price))
+            .map(|c| Evidence::At {
+                at_ms: c.at_ms,
+                window_ms: interval.duration_ms(),
+            }),
+
+        // Her bacak sağlanmalı; en eski kanıt bağlar.
+        Condition::All(inner) => {
+            let mut birlesik: Option<Evidence> = None;
+            for c in inner {
+                let ev = evidence(c, snap, since_ms)?;
+                birlesik = Some(match (birlesik, ev) {
+                    (None, e) => e,
+                    (Some(Evidence::Fresh), e) => e,
+                    (Some(e), Evidence::Fresh) => e,
+                    (Some(a), b) => en_eski(a, b),
+                });
+            }
+            birlesik
+        }
+
+        // Sağlanan bacaklar yeter; en yeni kanıt bağlar.
+        Condition::Any(inner) => {
+            let mut birlesik: Option<Evidence> = None;
+            for c in inner {
+                let Some(ev) = evidence(c, snap, since_ms) else {
+                    continue;
+                };
+                // Taze bir mark bacağı tek başına ateşlemeyi haklı kılar.
+                if matches!(ev, Evidence::Fresh) {
+                    return Some(Evidence::Fresh);
+                }
+                birlesik = Some(match birlesik {
+                    None => ev,
+                    Some(a) => en_yeni(a, ev),
+                });
+            }
+            birlesik
+        }
+    }
+}
+
+fn en_eski(a: Evidence, b: Evidence) -> Evidence {
+    let (
+        Evidence::At {
+            at_ms: aa,
+            window_ms: aw,
+        },
+        Evidence::At {
+            at_ms: ba,
+            window_ms: bw,
+        },
+    ) = (a, b)
+    else {
+        return a;
+    };
+    Evidence::At {
+        at_ms: aa.min(ba),
+        window_ms: aw.min(bw),
+    }
+}
+
+fn en_yeni(a: Evidence, b: Evidence) -> Evidence {
+    let (
+        Evidence::At {
+            at_ms: aa,
+            window_ms: aw,
+        },
+        Evidence::At {
+            at_ms: ba,
+            window_ms: bw,
+        },
+    ) = (a, b)
+    else {
+        return a;
+    };
+    Evidence::At {
+        at_ms: aa.max(ba),
+        window_ms: aw.min(bw),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +563,171 @@ mod tests {
         s.set_close(&btc(), Interval::H1, 89_000.0, 11_000);
         s.set_close(&btc(), Interval::H1, 95_000.0, 11_000);
         assert_eq!(s.close_after(&btc(), Interval::H1, 9_000), Some(89_000.0));
+    }
+
+    // -- kanıt / bayatlık ---------------------------------------------------
+
+    const SAAT: u64 = 3_600_000;
+
+    #[test]
+    fn saglanmayan_kosulun_kaniti_yok() {
+        let s = snap(&[(btc(), 80_000.0)]);
+        assert_eq!(evidence(&btc_saatlik_ustunde(90_000.0), &s, KURULDU), None);
+    }
+
+    #[test]
+    fn taze_kapanis_bayat_degil() {
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 10 * SAAT);
+        let ev = evidence(&btc_saatlik_ustunde(90_000.0), &s, KURULDU).unwrap();
+        // Kapanıştan 5 dakika sonra: pencere içinde.
+        assert!(!ev.is_stale(10 * SAAT + 300_000));
+    }
+
+    #[test]
+    fn periyot_dolunca_bayat_olur() {
+        // Saatlik alarmın penceresi 1 saat: watcher 6 saat düşüp geri gelirse
+        // o kapanışa dayanarak market emri göndermek, kullanıcının alarmının
+        // değil bizim gecikmemizin sonucu olur.
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 10 * SAAT);
+        let ev = evidence(&btc_saatlik_ustunde(90_000.0), &s, KURULDU).unwrap();
+
+        assert!(!ev.is_stale(11 * SAAT), "tam sınırda henüz bayat değil");
+        assert!(ev.is_stale(11 * SAAT + 1), "pencere doldu");
+        assert!(ev.is_stale(16 * SAAT), "6 saat sonra kesinlikle bayat");
+    }
+
+    #[test]
+    fn pencere_periyoda_gore_degisiyor() {
+        // Kullanıcının kuralı: saatlik girdiysek 1 saat, 15m girdiysek 15 dk.
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::M15, 90_500.0, 10 * SAAT);
+        let c = Condition::CandleClose {
+            symbol: btc(),
+            interval: Interval::M15,
+            cross: Cross::Above,
+            price: 90_000.0,
+        };
+        let ev = evidence(&c, &s, KURULDU).unwrap();
+        assert!(!ev.is_stale(10 * SAAT + 900_000), "15 dk sınırında");
+        assert!(ev.is_stale(10 * SAAT + 900_001), "15 dk doldu");
+    }
+
+    #[test]
+    fn mark_kosulu_hic_bayatlamaz() {
+        // Mark anlık durum: "şu an altında mı?" sorusunun bayatlığı olmaz.
+        let mut s = Snapshot::new();
+        s.set_mark(&btc(), 88_000.0);
+        let c = Condition::MarkCross {
+            symbol: btc(),
+            cross: Cross::Below,
+            price: 88_400.0,
+        };
+        let ev = evidence(&c, &s, KURULDU).unwrap();
+        assert_eq!(ev, Evidence::Fresh);
+        assert!(!ev.is_stale(u64::MAX));
+    }
+
+    #[test]
+    fn all_en_eski_bacaga_gore_bayatlar() {
+        // BTC'nin kanıtı 06:00'dan, ETH'ninki 11:00'den. Koşul 11:00'de
+        // sağlanmış görünüyor ama BTC beş saatlik bayat veri — bu arada
+        // 70k'ya inmiş olabilir. En eski bacak bağlamalı.
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 6 * SAAT);
+        s.set_close(&eth(), Interval::H1, 3_100.0, 11 * SAAT);
+        let c = Condition::All(vec![
+            btc_saatlik_ustunde(90_000.0),
+            eth_saatlik_ustunde(3_000.0),
+        ]);
+
+        assert_eq!(degerlendir(&c, &s), Some(true), "koşul sağlanıyor");
+        let ev = evidence(&c, &s, KURULDU).unwrap();
+        assert!(
+            ev.is_stale(11 * SAAT),
+            "BTC'nin 5 saatlik kanıtına dayanarak ateşlendi"
+        );
+    }
+
+    #[test]
+    fn all_bacaklarin_hepsi_tazeyse_bayat_degil() {
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 11 * SAAT);
+        s.set_close(&eth(), Interval::H1, 3_100.0, 11 * SAAT);
+        let c = Condition::All(vec![
+            btc_saatlik_ustunde(90_000.0),
+            eth_saatlik_ustunde(3_000.0),
+        ]);
+        assert!(!evidence(&c, &s, KURULDU)
+            .unwrap()
+            .is_stale(11 * SAAT + 60_000));
+    }
+
+    #[test]
+    fn any_en_yeni_bacaga_gore_bayatlar() {
+        // All'ın tam tersi: BTC'nin kanıtı eski ama ETH az önce sağlandı.
+        // Tek bacağın sağlanması yettiği için ateşleme haklı.
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 6 * SAAT);
+        s.set_close(&eth(), Interval::H1, 3_100.0, 11 * SAAT);
+        let c = Condition::Any(vec![
+            btc_saatlik_ustunde(90_000.0),
+            eth_saatlik_ustunde(3_000.0),
+        ]);
+        assert!(
+            !evidence(&c, &s, KURULDU)
+                .unwrap()
+                .is_stale(11 * SAAT + 60_000),
+            "taze ETH bacağı varken bayat sayıldı"
+        );
+    }
+
+    #[test]
+    fn any_hepsi_eskiyse_bayat() {
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 6 * SAAT);
+        s.set_close(&eth(), Interval::H1, 3_100.0, 6 * SAAT);
+        let c = Condition::Any(vec![
+            btc_saatlik_ustunde(90_000.0),
+            eth_saatlik_ustunde(3_000.0),
+        ]);
+        assert!(evidence(&c, &s, KURULDU).unwrap().is_stale(11 * SAAT));
+    }
+
+    #[test]
+    fn any_icindeki_taze_mark_bayatligi_kaldirir() {
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 6 * SAAT);
+        s.set_mark(&eth(), 2_900.0);
+        let c = Condition::Any(vec![
+            btc_saatlik_ustunde(90_000.0),
+            Condition::MarkCross {
+                symbol: eth(),
+                cross: Cross::Below,
+                price: 3_000.0,
+            },
+        ]);
+        assert_eq!(evidence(&c, &s, KURULDU), Some(Evidence::Fresh));
+    }
+
+    #[test]
+    fn bilesik_kosulda_en_kisa_periyot_pencereyi_belirler() {
+        // 1h ve 15m bacakları var: kullanıcı 15m hassasiyeti istiyorsa
+        // aciliyet ona göre.
+        let mut s = Snapshot::new();
+        s.set_close(&btc(), Interval::H1, 90_500.0, 10 * SAAT);
+        s.set_close(&btc(), Interval::M15, 90_500.0, 10 * SAAT);
+        let c = Condition::All(vec![
+            btc_saatlik_ustunde(90_000.0),
+            Condition::CandleClose {
+                symbol: btc(),
+                interval: Interval::M15,
+                cross: Cross::Above,
+                price: 90_000.0,
+            },
+        ]);
+        let ev = evidence(&c, &s, KURULDU).unwrap();
+        assert!(ev.is_stale(10 * SAAT + 900_001), "15 dk penceresi geçerli");
     }
 }

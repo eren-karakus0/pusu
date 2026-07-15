@@ -50,6 +50,7 @@ fn alarm(id: &str, price: f64, cross: Cross, armed_at_ms: u64) -> Alert {
             cross,
             price,
         },
+        invalidate: None,
         action: AlertAction::Trade(TradeSpec {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,

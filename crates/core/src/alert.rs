@@ -101,6 +101,21 @@ pub enum AlertState {
     /// işleme iki kez girer. Emir gerçekten geçmiş olabileceği için tekrar
     /// denemiyoruz; nihai sayıp işaretliyoruz.
     Uncertain,
+
+    /// Koşul sağlandı **ama biz çok geç gördük**. Emir gönderilmedi.
+    ///
+    /// Watcher uzun süre düşüp geri geldiğinde, saatler önce kapanmış bir mum
+    /// hâlâ kuralı sağlıyor olabilir — ama piyasa çoktan başka yerde.
+    /// O fiyata market emriyle girmek, kullanıcının kurduğu alarmın değil,
+    /// bizim gecikmemizin sonucu olur.
+    ///
+    /// Pencere periyodun kendisi: saatlik alarm 1 saat, 15 dakikalık alarm
+    /// 15 dakika. "Saatlik kapanışta gir" diyen kullanıcı için o saat
+    /// geçtiyse premis de geçmiştir.
+    ///
+    /// Sessizce düşürmüyoruz: kullanıcıya "kaçırdın, hâlâ istiyor musun?"
+    /// diye soruluyor. Kararı o veriyor, biz onun adına işleme girmiyoruz.
+    Missed,
 }
 
 impl AlertState {
@@ -108,7 +123,7 @@ impl AlertState {
     pub const fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Fired | Self::Cancelled | Self::Rejected | Self::Uncertain
+            Self::Fired | Self::Cancelled | Self::Rejected | Self::Uncertain | Self::Missed
         )
     }
 }
@@ -126,6 +141,19 @@ pub struct Alert {
     /// imza master'a dokunamıyor.
     pub account: String,
     pub condition: Condition,
+
+    /// Setup'ı geçersiz kılan koşul. Sağlanırsa alarm iptal edilir, emir girmez.
+    ///
+    /// Kullanıcının gerçek kurgusu tek bir tetikten ibaret değil: "saatlik 10'un
+    /// üstünde kapatırsa al — **ama 9'un altına düşerse bu setup ölmüştür,
+    /// iptal et**". İkinci yarısı olmadan alarm, senaryosu çoktan bozulmuş bir
+    /// işleme günler sonra girebilir.
+    ///
+    /// Zincire gömülemiyor: borsaya bırakılan `trig` kendi kendini iptal
+    /// edemez. Bu yüzden iptal koşulu olan alarm daima watcher'a düşüyor
+    /// ([`Alert::execution`]).
+    pub invalidate: Option<Condition>,
+
     pub action: AlertAction,
     pub state: AlertState,
     /// Alarmın kurulduğu an (unix ms).
@@ -141,11 +169,16 @@ pub struct Alert {
 impl Alert {
     /// Bu alarmı kim yürütecek? Koşul belirler.
     pub fn execution(&self) -> Execution {
+        use crate::condition::WatchReason;
+
         match self.action {
             // Bildirim zincire gömülemez: trig basket'i emir atar, bildirim
             // göndermez. Koşul ne olursa olsun watcher'a düşer.
             AlertAction::Notify => Execution::Watched {
-                reason: crate::condition::WatchReason::MultipleConditions,
+                reason: WatchReason::MultipleConditions,
+            },
+            AlertAction::Trade(_) if self.invalidate.is_some() => Execution::Watched {
+                reason: WatchReason::Invalidation,
             },
             AlertAction::Trade(_) => self.condition.execution(),
         }
@@ -190,6 +223,7 @@ mod tests {
             owner: "master".into(),
             account: "sub".into(),
             condition,
+            invalidate: None,
             action,
             state: AlertState::Armed,
             armed_at_ms: 0,
