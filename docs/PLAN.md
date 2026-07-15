@@ -187,11 +187,15 @@ enum Plan {
 - [ ] **Milestone: gerçek para, gerçek alarm, gerçek builder fee**
 
 ### Faz 3 — Sınıf 2 (watcher) · ~1.5 hafta
-- [ ] `engine`: kural değerlendirme döngüsü, mum kapanışı semantiği
-- [ ] Sub-account + agent wallet onboarding akışı (§7)
-- [ ] Agent key yönetimi: at-rest şifreleme, rotasyon, audit log
-- [ ] Execution + retry + idempotency (nonce yönetimi)
-- [ ] Bildirimler (web push)
+- [x] `engine`: kural değerlendirme döngüsü, mum kapanışı semantiği ✅ (2026-07-15)
+  - Eksik veriyle ateşlememe (`Option<bool>`), tazelik kapısı (`armed_at_ms`),
+    yanıt yorumu (`Ok` ≠ başarı), feed tekilleştirme, mark beslemesi
+  - Canlı doğrulandı: `examples/live_watch` (46 test)
+- [ ] Sub-account onboarding akışı + tarayıcıda imza (§7 — agent yok)
+- [ ] Ön-imzalı blob saklama: at-rest şifreleme, iptalde silme, audit log
+- [ ] `Dispatch`'in gerçek implementasyonu (kendi ince REST istemcimiz)
+- [ ] Bayatlık politikası (aşağıdaki açık karar)
+- [ ] Bildirimler (web push) — `Outcome::needs_attention()` olanlar öncelikli
 - [ ] Ücretsiz katman: NotifyOnly alarmlar
 
 ### Faz 4 — Derleyici / doğal dil · ~1 hafta
@@ -275,6 +279,21 @@ Karşı argüman: sonradan yükseltmek yeniden onay ister (sürtünme). Bilinçl
 
 - [x] ~~İsim~~ → **PUSU**. Türkçe olması artı: kitle ağırlıklı Türk trading toplulukları, kendi dilindeki ismi sahiplenir; yabancı için telaffuz edilebilir ve merak uyandırıcı
 - [x] ~~Fee~~ → **2 bps, onay = tahsilat** (§8)
+- [ ] **Bayatlık politikası: watcher uzun süre düştükten sonra ne olacak?** (Faz 3 blocker)
+
+  Watcher 6 saat düşüp geri geldiğinde, 6 saat önce kapanmış bir mumu görüp
+  alarmı **şimdi** ateşliyor. `armed_at_ms` kapısı buna engel değil — mum
+  alarmdan sonra kapanmış, kural sağlanmış. Ama piyasa 6 saatte bambaşka
+  yerde olabilir ve kullanıcı market emriyle oraya giriyor. Gerçek para zararı.
+
+  Şu an davranış: **ateşler**. Alternatifler:
+  1. Azami bayatlık = periyodun bir katı (1h alarmı ancak 1 saat içinde ateşler)
+  2. Sabit tavan (örn. 15 dk), periyottan bağımsız
+  3. Ateşleme, kullanıcıya "kaçırdın, hâlâ istiyor musun?" diye sor
+
+  Eğilimim (1): "saatlik kapanışta gir" diyen kullanıcı için o saat geçtiyse
+  premis de geçmiş. Ama (3) daha dürüst olabilir. Karar senin.
+
 - [ ] Domain: `pusu.trade` / `pusu.app` müsaitlik kontrolü
 - [ ] Ücretsiz katman sınırı: kullanıcı başına kaç NotifyOnly alarm?
 - [ ] Leptos mu Dioxus mu (SSR ihtiyacı ve grafik kütüphanesi olgunluğuna göre)
