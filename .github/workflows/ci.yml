@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # spike atılacak kod — ürün crate'lerini denetliyoruz.
+      # Ayrıca bulk-client'ın solana bağımlılık ağacı CI'yı gereksiz yere şişiriyor.
+      - name: Clippy
+        run: cargo clippy -p pusu-core -p pusu-feed --all-targets
+
+      - name: Test
+        run: cargo test -p pusu-core -p pusu-feed
+
+      # live_check ağa çıkıyor (BULK prod API'si) — CI'da çalıştırmıyoruz,
+      # ama derlenmesi kırılmadığını garanti ediyor.
+      - name: Örnekler derleniyor mu
+        run: cargo check -p pusu-feed --examples
