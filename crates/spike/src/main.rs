@@ -796,7 +796,10 @@ async fn cmd_onfill_bracket(api_url: &str) -> eyre::Result<()> {
     let signed = signer
         .sign_group(vec![basket, bracket], None)
         .map_err(|e| eyre::eyre!("imzalama: {e:?}"))?;
-    println!("payload:\n{}", serde_json::to_string_pretty(&signed.actions)?);
+    println!(
+        "payload:\n{}",
+        serde_json::to_string_pretty(&signed.actions)?
+    );
 
     let body = serde_json::json!({
         "actions": signed.actions, "nonce": signed.nonce,
@@ -814,7 +817,10 @@ async fn cmd_onfill_bracket(api_url: &str) -> eyre::Result<()> {
 
     println!("\n=== Sonuc ===");
     let a = c.get_account(master_pk).await?;
-    println!("acik emir (sonra): {} (once {acik_once})", a.open_orders.len());
+    println!(
+        "acik emir (sonra): {} (once {acik_once})",
+        a.open_orders.len()
+    );
     for o in a.open_orders.iter().take(8) {
         println!("   {o:?}");
     }
@@ -876,7 +882,9 @@ async fn cmd_bracket_variants(api_url: &str) -> eyre::Result<()> {
     let mut signer = KcSigner::new(kp);
 
     let mut gonder = |ad: &str, item: OrderItem| -> eyre::Result<()> {
-        let signed = signer.sign(item, None).map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+        let signed = signer
+            .sign(item, None)
+            .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
         let body = serde_json::json!({
             "actions": signed.actions, "nonce": signed.nonce,
             "account": signed.account, "signer": signed.signer, "signature": signed.signature,
@@ -907,7 +915,10 @@ async fn cmd_bracket_variants(api_url: &str) -> eyre::Result<()> {
             trigger_price: px * 1.05,
             actions: vec![
                 giris(0.001)?,
-                OrderItem::OnFill(OnFill { p: 0, actions: vec![rng(0.001)] }),
+                OrderItem::OnFill(OnFill {
+                    p: 0,
+                    actions: vec![rng(0.001)],
+                }),
             ],
             iso: false,
         }),
