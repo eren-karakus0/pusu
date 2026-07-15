@@ -1,0 +1,19 @@
+[package]
+name = "pusu-engine"
+version = "0.1.0"
+description = "Watcher: koşulu değerlendirir, tuttuğunda ön-imzalı tx'i gönderir"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+pusu-feed = { path = "../feed" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

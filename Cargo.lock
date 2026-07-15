@@ -1483,6 +1483,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pusu-engine"
+version = "0.1.0"
+dependencies = [
+ "pusu-core",
+ "pusu-feed",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pusu-feed"
 version = "0.1.0"
 dependencies = [

@@ -39,6 +39,7 @@ fn alert(condition: Condition, bracket: Option<Bracket>) -> Alert {
             bracket,
         }),
         state: AlertState::Armed,
+        armed_at_ms: 0,
     }
 }
 

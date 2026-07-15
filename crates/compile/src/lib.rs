@@ -210,6 +210,7 @@ mod tests {
             condition,
             action,
             state: AlertState::Armed,
+            armed_at_ms: 0,
         }
     }
 

@@ -92,12 +92,24 @@ pub enum AlertState {
     /// Ayrı bir durum, çünkü kullanıcıya söylemek zorundayız: alarmı çalıştı
     /// ama işlemi girmedi. Sessizce `Fired` demek yalan olur.
     Rejected,
+
+    /// Gönderildi, **sonucu bilinmiyor**. İnsan bakmalı.
+    ///
+    /// Ağ yanıtı kaybolduğunda ya da borsa anlaşılmayan bir cevap döndüğünde
+    /// buraya düşüyor. `Fired` demek uydurma olurdu; `Armed` bırakmak daha
+    /// beter — bir sonraki tur aynı emri tekrar gönderir ve kullanıcı aynı
+    /// işleme iki kez girer. Emir gerçekten geçmiş olabileceği için tekrar
+    /// denemiyoruz; nihai sayıp işaretliyoruz.
+    Uncertain,
 }
 
 impl AlertState {
-    /// Bu durum nihai mi?
+    /// Bu durum nihai mi? (Nihaiyse watcher bir daha göndermez.)
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Fired | Self::Cancelled | Self::Rejected)
+        matches!(
+            self,
+            Self::Fired | Self::Cancelled | Self::Rejected | Self::Uncertain
+        )
     }
 }
 
@@ -116,6 +128,14 @@ pub struct Alert {
     pub condition: Condition,
     pub action: AlertAction,
     pub state: AlertState,
+    /// Alarmın kurulduğu an (unix ms).
+    ///
+    /// Sadece kayıt değil, **doğruluk taşıyor**: "saatlik kapanış" bir olaydır,
+    /// bir durum değil. Kullanıcı 14:30'da alarm kurduğunda 14:00'te kapanmış
+    /// mumu kastetmiyor — bir sonrakini bekliyor. Bu alan olmadan, elinde taze
+    /// kapanış bulunan bir watcher yeni alarmı kurulduğu saniye ateşler ve
+    /// kullanıcıyı bir saat önceki fiyata dayanarak işleme sokar.
+    pub armed_at_ms: u64,
 }
 
 impl Alert {
@@ -172,6 +192,7 @@ mod tests {
             condition,
             action,
             state: AlertState::Armed,
+            armed_at_ms: 0,
         }
     }
 

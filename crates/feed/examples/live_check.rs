@@ -9,7 +9,7 @@
 //! ```
 
 use pusu_core::{Interval, Symbol};
-use pusu_feed::{last_closed, CandleTracker, HttpKlineSource, KlineSource};
+use pusu_feed::{last_closed, HttpKlineSource, HttpMarkSource, KlineSource, MarkSource};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> u64 {
@@ -65,35 +65,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ks.len()
     );
 
-    // 3. Tracker geçmişe ateşlemiyor mu?
-    let mut t = CandleTracker::new();
-    let ilk = t.observe(&btc, Interval::H1, &ks, now);
-    println!(
-        "\n3. İlk gözlem → {:?} (None olmalı: geçmişe ateşlemiyoruz)",
-        ilk.map(|k| k.close)
-    );
-    assert!(ilk.is_none(), "ilk gözlem ateşlememeliydi");
-    let ikinci = t.observe(&btc, Interval::H1, &ks, now);
-    println!(
-        "   Aynı veriyle ikinci gözlem → {:?} (None olmalı: tekrar yok)",
-        ikinci.map(|k| k.close)
-    );
-    assert!(ikinci.is_none(), "aynı mum iki kez ateşledi");
+    // 3. Mark price okunabiliyor mu? Bileşik koşulların bacağı buna bağlı.
+    let mark = HttpMarkSource::new(&base).mark(&btc).await?;
+    println!("\n3. BTC-USD mark: {mark:.2}");
 
-    // 4. 10s ile gerçek bir kapanış yakala — canlı ateşleme kanıtı.
-    println!("\n4. 10s mumuyla canlı kapanış bekleniyor (~30 sn)...");
-    let mut t10 = CandleTracker::new();
+    // 4. 10s mumuyla gerçek bir kapanış yakala — feed'in canlı kanıtı.
+    //    Ateşleme kararı burada değil, pusu-engine'de; burada yalnızca
+    //    "yeni kapanmış mum gerçekten geliyor mu" sorusu cevaplanıyor.
+    println!("\n4. 10s mumuyla canlı kapanış bekleniyor (~36 sn)...");
+    let mut son: Option<u64> = None;
     let mut yakalandi = false;
     for i in 0..12 {
         let now = now_ms();
-        let ks = src.klines(&btc, Interval::S10, Some(now - 120_000)).await?;
-        if let Some(k) = t10.observe(&btc, Interval::S10, &ks, now) {
-            println!(
-                "   ✅ yeni kapanış yakalandı: T={} close={:.2} (poll #{})",
-                k.close_time, k.close, i
-            );
-            yakalandi = true;
-            break;
+        let ks = src.fresh_klines(&btc, Interval::S10).await?;
+        if let Some(k) = last_closed(&ks, now) {
+            if son.is_some_and(|prev| k.close_time > prev) {
+                println!(
+                    "   ✅ yeni kapanış: T={} close={:.2} ({:.1} sn önce, poll #{i})",
+                    k.close_time,
+                    k.close,
+                    (now - k.close_time) as f64 / 1000.0,
+                );
+                yakalandi = true;
+                break;
+            }
+            son = Some(k.close_time);
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
