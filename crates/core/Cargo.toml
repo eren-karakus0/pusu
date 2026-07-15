@@ -1,0 +1,13 @@
+[package]
+name = "pusu-core"
+version = "0.1.0"
+description = "PUSU domain model: alarmlar, koşullar ve hangi katmanın yürüteceğine karar veren sınıflandırıcı"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/spike"]
+members = ["crates/core", "crates/spike"]
 
 [workspace.package]
 edition = "2021"
@@ -23,3 +23,5 @@ bs58 = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "macros"] }
