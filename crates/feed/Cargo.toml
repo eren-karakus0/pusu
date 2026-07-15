@@ -1,0 +1,22 @@
+[package]
+name = "pusu-feed"
+version = "0.1.0"
+description = "Mum kapanışı tespiti — BULK /klines üzerinden, sınır anlarında polling"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[example]]
+name = "live_check"

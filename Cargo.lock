@@ -1470,6 +1470,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pusu-feed"
+version = "0.1.0"
+dependencies = [
+ "pusu-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

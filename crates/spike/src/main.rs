@@ -153,11 +153,7 @@ fn verdict(label: &str, res: eyre::Result<Vec<bulk_client::msgs::Response>>) -> 
     match res {
         Ok(rs) => {
             for r in &rs {
-                let reason = r
-                    .raw
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("-");
+                let reason = r.raw.get("reason").and_then(|v| v.as_str()).unwrap_or("-");
                 println!("   {label}: status={} reason={reason}", r.status);
             }
             rs.first().map(|r| r.status.clone())
@@ -447,8 +443,8 @@ async fn cmd_trigger_keychain(api_url: &str) -> eyre::Result<()> {
     let before = c.get_account(builder_pk).await?.margin.total_balance;
     println!("BTC mark: {px} | builder bakiyesi (önce): {before}");
 
-    let kp = KcKeypair::from_base58(&keys.master)
-        .map_err(|e| eyre::eyre!("keychain keypair: {e:?}"))?;
+    let kp =
+        KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("keychain keypair: {e:?}"))?;
     let mut signer = KcSigner::new(kp);
 
     // Gömülü market emri — builderCode taşıyor
@@ -505,7 +501,10 @@ async fn cmd_trigger_keychain(api_url: &str) -> eyre::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let after = c.get_account(builder_pk).await?.margin.total_balance;
-    println!("\nbuilder bakiyesi (sonra): {after} | fark: {}", after - before);
+    println!(
+        "\nbuilder bakiyesi (sonra): {after} | fark: {}",
+        after - before
+    );
     println!("beklenen: ~{:.6}", px * 0.001 * 0.0002);
 
     Ok(())
@@ -524,7 +523,9 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
     let agent_pk = TransactionSigner::from_private_key(&keys.agent)?.public_key();
     let builder_pk = TransactionSigner::from_private_key(&keys.builder)?.public_key();
     let sub_pk = solana_pubkey::Pubkey::from_str(
-        keys.sub.as_deref().ok_or_else(|| eyre::eyre!("önce sub-account-builder çalıştır"))?,
+        keys.sub
+            .as_deref()
+            .ok_or_else(|| eyre::eyre!("önce sub-account-builder çalıştır"))?,
     )?;
 
     println!("master: {master_pk}\nagent : {agent_pk}\nsub   : {sub_pk}");
@@ -534,7 +535,10 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
     // İçeride place_tx(.., None, ..) çağrıldığı için tx.account = signer = master oluyor.
     // Doğru kapsamlama için place_tx'e account'ı ELDEN geçirmek zorundayız.
     println!("\n=== 0. Master'a yanlışlıkla kaydolmuş agent'ı SİL ===");
-    match master_c.manage_agent_wallet(agent_pk, true, None, None).await {
+    match master_c
+        .manage_agent_wallet(agent_pk, true, None, None)
+        .await
+    {
         Ok(r) => println!("   status={} raw={}", r.status, r.raw),
         Err(e) => println!("   ❌ {e}"),
     }
@@ -543,7 +547,12 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
     let reg = Action::AgentWalletCreation(bulk_client::msgs::AgentWalletCreation {
         agent: agent_pk,
         delete: false,
-        meta: ActionMeta { account: sub_pk, nonce: 0, seqno: 0, hash: None },
+        meta: ActionMeta {
+            account: sub_pk,
+            nonce: 0,
+            seqno: 0,
+            hash: None,
+        },
     });
     match master_c.place_tx(vec![reg], Some(sub_pk), None).await {
         Ok(rs) => {
@@ -573,7 +582,12 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
         from: sub_pk,
         to: master_pk,
         margin_amount: 10.0,
-        meta: ActionMeta { account: sub_pk, nonce: 0, seqno: 0, hash: None },
+        meta: ActionMeta {
+            account: sub_pk,
+            nonce: 0,
+            seqno: 0,
+            hash: None,
+        },
     });
     match agent_c.place_tx(vec![t], Some(sub_pk), None).await {
         Ok(rs) => {
@@ -592,7 +606,12 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
         from: sub_pk,
         to: hedef,
         margin_amount: 10.0,
-        meta: ActionMeta { account: sub_pk, nonce: 0, seqno: 0, hash: None },
+        meta: ActionMeta {
+            account: sub_pk,
+            nonce: 0,
+            seqno: 0,
+            hash: None,
+        },
     });
     match agent_c.place_tx(vec![t], Some(sub_pk), None).await {
         Ok(rs) => {
@@ -616,8 +635,14 @@ async fn cmd_agent_transfer(api_url: &str) -> eyre::Result<()> {
     }
 
     println!("\n=== Bakiyeler ===");
-    println!("master: {}", master_c.get_account(master_pk).await?.margin.total_balance);
-    println!("sub   : {}", master_c.get_account(sub_pk).await?.margin.total_balance);
+    println!(
+        "master: {}",
+        master_c.get_account(master_pk).await?.margin.total_balance
+    );
+    println!(
+        "sub   : {}",
+        master_c.get_account(sub_pk).await?.margin.total_balance
+    );
 
     Ok(())
 }
@@ -655,7 +680,11 @@ async fn cmd_nonce_age(api_url: &str) -> eyre::Result<()> {
     // 30 gün sonraki nonce
     let future_ns = now_ns + 30u64 * 24 * 60 * 60 * 1000 * 1_000_000;
 
-    for (label, nonce) in [("30 GÜN ESKİ", old_ns), ("30 GÜN İLERİ", future_ns), ("ŞİMDİ", now_ns)] {
+    for (label, nonce) in [
+        ("30 GÜN ESKİ", old_ns),
+        ("30 GÜN İLERİ", future_ns),
+        ("ŞİMDİ", now_ns),
+    ] {
         let item = OrderItem::Order(Order {
             symbol: "BTC-USD".into(),
             is_buy: true,
@@ -667,16 +696,23 @@ async fn cmd_nonce_age(api_url: &str) -> eyre::Result<()> {
             client_id: None,
             commission: None,
         });
-        let signed = signer.sign(item, Some(nonce)).map_err(|e| eyre::eyre!("{e:?}"))?;
+        let signed = signer
+            .sign(item, Some(nonce))
+            .map_err(|e| eyre::eyre!("{e:?}"))?;
         let body = serde_json::json!({
             "actions": signed.actions, "nonce": signed.nonce,
             "account": signed.account, "signer": signed.signer, "signature": signed.signature,
         });
         let resp = reqwest::Client::new()
             .post(format!("{api_url}/order"))
-            .json(&body).send().await?;
+            .json(&body)
+            .send()
+            .await?;
         let txt = resp.text().await?;
-        println!("{label:<14} nonce={nonce} → {}", txt.chars().take(160).collect::<String>());
+        println!(
+            "{label:<14} nonce={nonce} → {}",
+            txt.chars().take(160).collect::<String>()
+        );
     }
     Ok(())
 }

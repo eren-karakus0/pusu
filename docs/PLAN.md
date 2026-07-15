@@ -44,8 +44,9 @@ Ayrım teknik değil, **güven** ayrımı — ve gizlenmek yerine ürünün merk
 
 ### ⚡ Sınıf 2 — Watcher'ın değerlendirdiği alarm
 - **Koşul:** mum kapanışı, indikatör, çok koşullu, zaman pencereli — mark-price kesişimiyle ifade edilemeyen her şey
-- **Yürütme:** watcher `candle.{symbol}.{interval}` stream'ini dinler, koşul tutunca agent wallet emri atar
-- **Agent gerekiyor** → sub-account izolasyonu zorunlu (§7)
+- **İmza:** yine kullanıcı, tarayıcıda — **ön-imzalı** (§7). Sunucuda key yok
+- **Yürütme:** watcher `/klines`'ı sınır anlarında sorgular, koşul tutunca ön-imzalı tx'i **gönderir**
+- **Agent YOK** — Faz 0'da agent'ın para çıkarabildiği görülünce tasarım değişti (§7)
 - **Bizim uptime'ımıza bağlı** — kullanıcıya açıkça söylenir
 
 ### Derleyicinin routing kararı = ürünün kalbi
@@ -82,7 +83,8 @@ crates/
 | Katman | Kütüphane | Neden |
 |---|---|---|
 | **İmzalama** | `bulk-keychain` | Kanonik. `trig`/`of`/`rng` doğru imzalıyor — Faz 0'da doğrulandı |
-| Market data / WS | `bulk-client` | actor+watch mimarisi hazır: tek actor socket'i sahipleniyor, tüketiciler `tokio::watch` ile zero-copy okuyor. Çok sembollü candle watcher için birebir |
+| Mum kapanışı | **kendi kodumuz** (`pusu-feed`) | REST `/klines` polling. `bulk-client`'ın candle handler'ı kırık (§8.6) ve WS zaten ağır |
+| Ticker / hesap akışı | `bulk-client` | actor+watch mimarisi sağlam; canlı fiyat göstergesi ve pozisyon takibi için |
 | Tarayıcı imzası | `bulk-keychain-wasm` | Kullanıcı kendi anahtarıyla imzalar; sunucuda key yok |
 
 ⚠️ **`bulk-client` ile İMZALAMA YAPMIYORUZ.** v0.1.2'de `Trigger` struct'ında `iso` alanı eksik → trigger basket `bad signature` alıyor. `Trailing` de aynı riski taşıyor. Ayrıca `manage_agent_wallet(account: Some(x))` sessizce kapsamlama yapmıyor. Detay: [`research/02-staging-spike.md`](research/02-staging-spike.md) §6.
@@ -145,12 +147,26 @@ enum Plan {
 **Sürpriz bulgu:** `USD-TRY` (20x), `GOLD-USD`, `EUR-USD`, `USD-JPY`, `USD-KRW` yapılandırılmış ama henüz açılmamış. Türk kitleye hitap eden bir ürün için `USD-TRY` stratejik kart.
 
 ### Faz 1 — Temel · ~1 hafta
-- [ ] Cargo workspace, CI, lint/fmt
-- [ ] `core`: domain model
-- [ ] `bulk-client` entegrasyonu: market data, account stream
+- [x] Cargo workspace
+- [x] `core`: domain model + yürütme katmanı sınıflandırıcısı (20 test)
+- [ ] CI: fmt/clippy/test
+- [ ] `feed`: mum kapanışı tespiti — **sınır anlarında REST `/klines` polling**
 - [ ] `storage`: şema + migration'lar
-- [ ] Market data pipeline: candle + ticker abonelikleri, yeniden bağlanma, boşluk doldurma
 - [ ] Sağlık/gözlemlenebilirlik iskeleti (watcher güvenilirliği ürünün kredibilitesi — §9)
+
+> **Karar değişikliği:** "candle WS aboneliği" planlanmıştı; ölçüm sonrası **filtresiz REST polling**e
+> geçildi. WS abonelik başına ~1,9 MB ilk dump atıyor (11 sembol × 4 timeframe ≈ 85 MB/reconnect) ve
+> 1 MB'lık varsayılan frame limitini aşıp bağlantıyı kopartıyor. Ayrıca `bulk-client`'ın candle
+> handler'ı zaten kırık (3. bug). Filtresiz REST'te 1h = 23 KB, 4h = 6 KB, 1d = 1 KB — bedava sayılır.
+> Detay: [`research/02-staging-spike.md`](research/02-staging-spike.md) §8.6
+>
+> ⚠️ **İki kural — ikisi de ürünü sessizce bozardı:**
+> 1. `/klines` bazen **devam eden** mumu döndürüyor → daima `T <= now` filtrele. Kaçırılırsa
+>    "saatlik kapanış" alarmı erken ateşler; kullanıcının kaçınmak istediği şeyin ta kendisi.
+> 2. `startTime` filtresi **~60 sn bayat** veri döndürüyor (origin kaynaklı, CDN değil) →
+>    canlı tespitte kullanma. Cazip (142 byte) ama alarmı bir dakika geç ateşler.
+>
+> **v1 kapsamı: 15m ve üstü timeframe'ler.** 1m filtresiz 1,3 MB/poll, `startTime` de bayat.
 
 ### Faz 2 — Sınıf 1 uçtan uca · ~1.5 hafta
 - [ ] `compiler`: `MarkCross + Trade` → `trig` basket + `of` bracket
