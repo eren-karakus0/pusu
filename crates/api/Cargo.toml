@@ -1,0 +1,24 @@
+[package]
+name = "pusu-api"
+version = "0.1.0"
+description = "PUSU ingress: tarayıcının imzaladığı alarmları ve ön-imzalı blob'ları store'a yazar"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+pusu-store = { path = "../store" }
+axum.workspace = true
+tower-http.workspace = true
+tokio.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+sqlx = { workspace = true }
