@@ -278,6 +278,60 @@ impl Store {
         Ok(())
     }
 
+    /// Kullanıcının **beklemedeki** (armed) alarmını iptal et.
+    ///
+    /// Owner ve state koşullu: başkasının alarmına dokunmaz, çoktan ateşlenmiş
+    /// (fired/working…) bir alarmı iptal etmez. Watched armed alarmın borsada
+    /// canlı emri olmadığı için iptal yalnızca yerel: state → cancelled, blob'lar
+    /// silinir (bir daha gönderilemesin). İptal edildiyse `true`.
+    ///
+    /// Working iptali bu yola girmiyor: orada defterde canlı bir limit emri var,
+    /// iptali ön-imzalı `cx`'in watcher'ca gönderilmesini gerektiriyor.
+    pub async fn cancel_armed(&self, alert_id: &AlertId, owner: &str) -> Result<bool, StoreError> {
+        let n = sqlx::query(
+            "UPDATE alerts SET state = 'cancelled'::alert_state, updated_at = now() \
+             WHERE id = $1 AND owner = $2 AND state = 'armed'",
+        )
+        .bind(alert_id.as_str())
+        .bind(owner)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+
+        if n == 0 {
+            return Ok(false);
+        }
+        // Blob'lar artık gereksiz. Alarm satırı kaldığı için CASCADE devreye
+        // girmiyor; elle siliyoruz (iptal edilen alarm asla gönderilmemeli).
+        sqlx::query("DELETE FROM presigned_blobs WHERE alert_id = $1")
+            .bind(alert_id.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(true)
+    }
+
+    /// Kullanıcının **sonlanmış** alarmını listeden kaldır (satır + blob'lar).
+    ///
+    /// Owner ve state koşullu: aktif alarm (armed/working) silinmiyor — önce
+    /// iptal edilmeli. Denetim kaydı FK'siz olduğu için silinmeden kalıyor.
+    /// Silindiyse `true`.
+    pub async fn delete_owned_terminal(
+        &self,
+        alert_id: &AlertId,
+        owner: &str,
+    ) -> Result<bool, StoreError> {
+        let n = sqlx::query(
+            "DELETE FROM alerts \
+             WHERE id = $1 AND owner = $2 AND state NOT IN ('armed', 'working')",
+        )
+        .bind(alert_id.as_str())
+        .bind(owner)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
     /// Değişmez denetim kaydına bir satır ekle.
     pub async fn audit(
         &self,

@@ -15,15 +15,36 @@ pub async fn create_alert(body: &Value) -> Result<(), String> {
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    ok_or_err(resp, "alarm kaydedilemedi").await
+}
 
+/// Beklemedeki alarmı iptal et: `POST /alerts/{id}/cancel?owner=`.
+pub async fn cancel_alert(id: &str, owner: &str) -> Result<(), String> {
+    let url = format!("{PUSU_API_URL}/alerts/{id}/cancel?owner={owner}");
+    let resp = gloo_net::http::Request::post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(resp, "alarm iptal edilemedi").await
+}
+
+/// Sonlanmış alarmı listeden kaldır: `DELETE /alerts/{id}?owner=`.
+pub async fn delete_alert(id: &str, owner: &str) -> Result<(), String> {
+    let url = format!("{PUSU_API_URL}/alerts/{id}?owner={owner}");
+    let resp = gloo_net::http::Request::delete(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    ok_or_err(resp, "alarm kaldırılamadı").await
+}
+
+/// Yanıtı sonuca çevir: ok değilse `{"error": ...}` gövdesinden mesajı al.
+async fn ok_or_err(resp: gloo_net::http::Response, fallback: &str) -> Result<(), String> {
     if resp.ok() {
         return Ok(());
     }
     let v: Value = resp.json().await.unwrap_or(Value::Null);
-    Err(v["error"]
-        .as_str()
-        .unwrap_or("alarm kaydedilemedi")
-        .to_string())
+    Err(v["error"].as_str().unwrap_or(fallback).to_string())
 }
 
 /// Kullanıcının alarmlarını `GET /alerts?owner=`'dan çek (en yeni önce).

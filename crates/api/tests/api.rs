@@ -275,3 +275,120 @@ fn owner_belirtilmezse_reddediliyor() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
     });
 }
+
+#[test]
+fn armed_alarm_iptal_edilip_bloblari_siliniyor() {
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+
+        let (status, _) = iste(
+            &store,
+            "POST",
+            &format!("/alerts/a1/cancel?owner={MASTER}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Listede cancelled görünüyor, watcher'ın canlı setinden düştü.
+        let (_, list) = iste(&store, "GET", &format!("/alerts?owner={MASTER}"), None).await;
+        assert_eq!(list.as_array().unwrap()[0]["state"], "cancelled");
+        assert!(store.load_live().await.unwrap().is_empty());
+
+        // Blob'lar bir daha gönderilemesin diye silindi.
+        assert!(store
+            .get_blob(&a.id, BlobRole::Entry)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(store
+            .get_blob(&a.id, BlobRole::Cancel)
+            .await
+            .unwrap()
+            .is_none());
+    });
+}
+
+#[test]
+fn baskasinin_alarmi_iptal_edilemiyor() {
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+
+        let (status, _) = iste(&store, "POST", "/alerts/a1/cancel?owner=baskasi", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        // Dokunulmadı: hâlâ armed/canlı.
+        assert_eq!(store.load_live().await.unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn sonlanmis_alarm_listeden_kaldirilabiliyor() {
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+        // Önce iptal (armed → cancelled = terminal), sonra kaldır.
+        iste(
+            &store,
+            "POST",
+            &format!("/alerts/a1/cancel?owner={MASTER}"),
+            None,
+        )
+        .await;
+        let (status, _) = iste(
+            &store,
+            "DELETE",
+            &format!("/alerts/a1?owner={MASTER}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (_, list) = iste(&store, "GET", &format!("/alerts?owner={MASTER}"), None).await;
+        assert!(list.as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn aktif_alarm_kaldirilamiyor() {
+    // Defterde/beklemede alarm önce iptal edilmeli; doğrudan silinemez.
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+
+        let (status, _) = iste(
+            &store,
+            "DELETE",
+            &format!("/alerts/a1?owner={MASTER}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(store.load_live().await.unwrap().len(), 1, "silinmemeli");
+    });
+}

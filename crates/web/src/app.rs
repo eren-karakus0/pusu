@@ -514,9 +514,10 @@ fn AlertList(owner: String, reload: RwSignal<u32>) -> impl IntoView {
     let loading = RwSignal::new(true);
     let error = RwSignal::new(None::<String>);
 
+    let ef_owner = owner.clone();
     Effect::new(move |_| {
         reload.get(); // bağımlılık: sayaç artınca yeniden çek
-        let owner = owner.clone();
+        let owner = ef_owner.clone();
         loading.set(true);
         error.set(None);
         spawn_local(async move {
@@ -548,7 +549,11 @@ fn AlertList(owner: String, reload: RwSignal<u32>) -> impl IntoView {
                     }
                     .into_any()
                 } else {
-                    let rows = alerts.get().iter().map(alert_row).collect::<Vec<_>>();
+                    let rows = alerts
+                        .get()
+                        .into_iter()
+                        .map(|a| view! { <AlertRow alert=a owner=owner.clone() reload=reload /> })
+                        .collect::<Vec<_>>();
                     view! { <ul class="alist">{rows}</ul> }.into_any()
                 }
             }}
@@ -561,12 +566,65 @@ fn AlertList(owner: String, reload: RwSignal<u32>) -> impl IntoView {
     }
 }
 
-/// Tek bir alarm satırı: koşul + işlem + durum rozeti.
-fn alert_row(a: &Alert) -> impl IntoView {
-    let (pill_cls, pill_txt) = state_pill(a.state);
-    let cond = describe_condition(&a.condition);
-    let act = describe_action(&a.action);
-    let inv = a.invalidate.is_some();
+/// Tek bir alarm satırı: koşul + işlem + durum rozeti + aksiyon.
+///
+/// Aksiyon durumdan sabit: beklemedeki alarm iptal edilebilir, sonlanmış alarm
+/// listeden kaldırılabilir, defterde bekleyen (working) alarma dokunulmaz —
+/// orada borsada canlı bir emir var, iptalini watcher yönetiyor.
+#[component]
+fn AlertRow(alert: Alert, owner: String, reload: RwSignal<u32>) -> impl IntoView {
+    let (pill_cls, pill_txt) = state_pill(alert.state);
+    let cond = describe_condition(&alert.condition);
+    let act = describe_action(&alert.action);
+    let inv = alert.invalidate.is_some();
+    let id = alert.id.as_str().to_string();
+    let busy = RwSignal::new(false);
+    let err = RwSignal::new(None::<String>);
+
+    let action = if alert.state == AlertState::Armed {
+        let (id, owner) = (id.clone(), owner.clone());
+        let on_cancel = move |_| {
+            let (id, owner) = (id.clone(), owner.clone());
+            busy.set(true);
+            err.set(None);
+            spawn_local(async move {
+                match api::cancel_alert(&id, &owner).await {
+                    Ok(()) => reload.update(|n| *n += 1),
+                    Err(e) => {
+                        err.set(Some(e));
+                        busy.set(false);
+                    }
+                }
+            });
+        };
+        Some(
+            view! { <button class="ghost" on:click=on_cancel disabled=busy>"İptal et"</button> }
+                .into_any(),
+        )
+    } else if alert.state.is_terminal() {
+        let (id, owner) = (id.clone(), owner.clone());
+        let on_delete = move |_| {
+            let (id, owner) = (id.clone(), owner.clone());
+            busy.set(true);
+            err.set(None);
+            spawn_local(async move {
+                match api::delete_alert(&id, &owner).await {
+                    Ok(()) => reload.update(|n| *n += 1),
+                    Err(e) => {
+                        err.set(Some(e));
+                        busy.set(false);
+                    }
+                }
+            });
+        };
+        Some(
+            view! { <button class="ghost" on:click=on_delete disabled=busy>"Kaldır"</button> }
+                .into_any(),
+        )
+    } else {
+        None // working: borsada canlı emir, watcher yönetiyor
+    };
+
     view! {
         <li class="arow">
             <div class="arow-main">
@@ -575,8 +633,12 @@ fn alert_row(a: &Alert) -> impl IntoView {
                     {act}
                     {inv.then_some(" · iptal koşullu")}
                 </span>
+                {move || err.get().map(|e| view! { <span class="arow-err">{e}</span> })}
             </div>
-            <span class=pill_cls>{pill_txt}</span>
+            <div class="arow-side">
+                <span class=pill_cls>{pill_txt}</span>
+                {action}
+            </div>
         </li>
     }
 }

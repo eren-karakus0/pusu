@@ -14,13 +14,13 @@
 //! auth Faz 2'de eklenecek — şimdilik staging.)
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
-use pusu_core::{Alert, AlertAction};
+use pusu_core::{Alert, AlertAction, AlertId};
 use pusu_store::{BlobRole, Store, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -51,27 +51,75 @@ pub fn router(store: Store) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/alerts", post(create_alert).get(list_alerts))
+        .route("/alerts/{id}/cancel", post(cancel_alert))
+        .route("/alerts/{id}", delete(dismiss_alert))
         // Tarayıcı farklı origin'den çağırıyor. Staging'de gevşek; prod'da
         // frontend origin'ine daraltılacak.
         .layer(CorsLayer::permissive())
         .with_state(store)
 }
 
-/// `GET /alerts?owner=<pubkey>` — kullanıcının alarmlarını listele.
+/// Sahip doğrulaması için ortak sorgu — `?owner=<pubkey>`.
+///
+/// Gerçek auth değil (owner pubkey zaten public); yalnızca id + owner ikisini
+/// birden bilmeyi şart koşuyor. Watched armed alarmın iptali fon hareketi
+/// içermediği için staging'de yeterli — gerçek imza-tabanlı auth Faz 2.
 #[derive(Debug, Deserialize)]
-struct ListQuery {
+struct OwnerQuery {
     owner: String,
 }
 
 async fn list_alerts(
     State(store): State<Store>,
-    Query(q): Query<ListQuery>,
+    Query(q): Query<OwnerQuery>,
 ) -> Result<Response, ApiError> {
     if q.owner.trim().is_empty() {
         return Err(ApiError::bad("owner gerekli"));
     }
     let alerts = store.list_by_owner(&q.owner).await?;
     Ok(Json(alerts).into_response())
+}
+
+/// `POST /alerts/{id}/cancel?owner=` — beklemedeki alarmı iptal et.
+async fn cancel_alert(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let aid = AlertId::new(id);
+    if !store.cancel_armed(&aid, &q.owner).await? {
+        return Err(ApiError::conflict(
+            "iptal edilemedi: alarm bulunamadı, sahibi değilsin ya da artık beklemede değil",
+        ));
+    }
+    store
+        .audit(&aid, "cancelled", &json!({ "via": "api" }))
+        .await?;
+    Ok(Json(json!({ "id": aid.as_str(), "state": "cancelled" })).into_response())
+}
+
+/// `DELETE /alerts/{id}?owner=` — sonlanmış alarmı listeden kaldır.
+async fn dismiss_alert(
+    State(store): State<Store>,
+    Path(id): Path<String>,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let aid = AlertId::new(id);
+    if !store.delete_owned_terminal(&aid, &q.owner).await? {
+        return Err(ApiError::conflict(
+            "kaldırılamadı: alarm bulunamadı, sahibi değilsin ya da hâlâ aktif (önce iptal et)",
+        ));
+    }
+    store
+        .audit(&aid, "dismissed", &json!({ "via": "api" }))
+        .await?;
+    Ok(Json(json!({ "id": aid.as_str(), "deleted": true })).into_response())
 }
 
 async fn create_alert(
@@ -131,6 +179,9 @@ fn check_account(payload: &Value, expected: &str) -> Result<(), ApiError> {
 pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),
+    /// İstek geçerli ama alarmın durumu izin vermiyor (ör. aktif alarmı silmek).
+    #[error("{0}")]
+    Conflict(String),
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -139,12 +190,17 @@ impl ApiError {
     fn bad(msg: &str) -> Self {
         Self::BadRequest(msg.to_string())
     }
+
+    fn conflict(msg: &str) -> Self {
+        Self::Conflict(msg.to_string())
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, msg) = match &self {
             Self::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
+            Self::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             // İç hatayı istemciye sızdırmıyoruz; ayrıntı günlüğe.
             Self::Store(e) => {
                 tracing::error!("store hatası: {e}");
