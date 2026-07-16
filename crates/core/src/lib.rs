@@ -30,6 +30,8 @@ pub mod alert;
 pub mod condition;
 pub mod market;
 
-pub use alert::{Alert, AlertAction, AlertId, AlertState, Bracket, TradeSpec, BUILDER_FEE_BPS};
+pub use alert::{
+    Alert, AlertAction, AlertId, AlertState, ExitLeg, Exits, TradeSpec, BUILDER_FEE_BPS,
+};
 pub use condition::{Condition, Execution, WatchReason};
 pub use market::{Cross, Interval, Side, Symbol};

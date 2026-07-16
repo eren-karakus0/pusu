@@ -345,7 +345,7 @@ mod tests {
                 symbol: "BTC-USD".into(),
                 side: Side::Buy,
                 size: 0.01,
-                bracket: None,
+                exits: None,
             }),
             state: AlertState::Armed,
             armed_at_ms,

@@ -57,6 +57,8 @@ enum Command {
     OidPredict,
     /// S11: kademeli çıkış — TP1 dolup pozisyon küçülünce büyük kalan SL ne yapıyor?
     ExitLadder,
+    /// S12: trig içine kademeli çıkış (tp+tp+st+st) sığıyor mu?
+    TrigLadder,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -674,6 +676,7 @@ async fn main() -> eyre::Result<()> {
         Command::OnfillRealParent => cmd_onfill_real_parent(&cli.api_url).await,
         Command::OidPredict => cmd_oid_predict(&cli.api_url).await,
         Command::ExitLadder => cmd_exit_ladder(&cli.api_url).await,
+        Command::TrigLadder => cmd_trig_ladder(&cli.api_url).await,
     }
 }
 
@@ -1417,6 +1420,107 @@ async fn cmd_exit_ladder(api_url: &str) -> eyre::Result<()> {
     } else {
         println!("beklenmedik: {son}");
     }
+
+    temizle(api_url, &mut signer, &pk).await?;
+    Ok(())
+}
+
+/// S12 — `trig` icine kademeli cikis (tp+tp+st) sigiyor mu?
+///
+/// `TriggerBasket` doc'u "Nested actions may be: m, l, mod, cx, cxa, st, tp,
+/// rng" diyor — yani sigmali. Ama §8.7'de `of`'un `trig` icine gomulemedigini
+/// (`invalid action in trigger order`) ogrendik: doc'a guvenmiyoruz.
+///
+/// Onemli: OnChain sablonunda market REDDEDILIRSE cikislar yine kuruluyor
+/// (§8.7). Kademeli cikista ayni risk var mi, o da goruluyor.
+async fn cmd_trig_ladder(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Commission, Keypair as KcKeypair, Order, OrderItem, OrderType, Signer as KcSigner, Stop,
+        TakeProfit, TriggerBasket,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let pk = kp.pubkey().to_base58();
+    let mut signer = KcSigner::new(kp);
+    println!("BTC mark: {px} | hesap: {pk}");
+
+    temizle(api_url, &mut signer, &pk).await?;
+
+    // Long girisi + kademeli cikis, hepsi trig icinde.
+    // tp: is_buy=true (yukari tetikler) | st: is_buy=false (asagi tetikler)
+    let giris = OrderItem::Order(Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: 0.0,
+        size: 0.004,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::market(),
+        client_id: None,
+        commission: Some(
+            Commission::new(
+                bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                    .map_err(|e| eyre::eyre!("{e:?}"))?,
+                2,
+            )
+            .map_err(|e| eyre::eyre!("{e:?}"))?,
+        ),
+    });
+    let tp = |size: f64, trig: f64| {
+        OrderItem::TakeProfit(TakeProfit {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            size,
+            trigger_price: trig,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    };
+    let st = |size: f64, trig: f64| {
+        OrderItem::Stop(Stop {
+            symbol: "BTC-USD".into(),
+            is_buy: false,
+            size,
+            trigger_price: trig,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    };
+
+    println!("\n=== trig {{ actions: [m, tp %30, tp %70, st %50, st %50] }} ===");
+    println!("(trig tetigi fiyatin ustunde + 'altina inerse' → hemen ateslemeli)");
+    let basket = OrderItem::TriggerBasket(TriggerBasket {
+        symbol: "BTC-USD".into(),
+        // is_buy = "esigin ustunde mi?" tuzagi: false = altina inince atesle.
+        is_buy: false,
+        trigger_price: px * 1.05,
+        actions: vec![
+            giris,
+            tp(0.0012, px * 1.05),
+            tp(0.0028, px * 1.10),
+            st(0.002, px * 0.92),
+            st(0.002, px * 0.90),
+        ],
+        iso: false,
+    });
+
+    let r = gonder_items(api_url, &mut signer, vec![basket]).await?;
+    println!("{r}");
+    if r.contains("invalid action in trigger order") {
+        println!("\n❌ trig kademeli cikis KABUL ETMIYOR — OnChain'de ladder yok.");
+        temizle(api_url, &mut signer, &pk).await?;
+        return Ok(());
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    emirleri_yaz(api_url, &pk, "trig atesledikten sonra").await?;
+
+    let poz = pozisyon(api_url, &pk).await?;
+    println!("\n>>> pozisyon = {poz} (0.004 bekleniyor)");
+    println!(">>> yukarida 4 koruma emri (tp 0.0012, tp 0.0028, st 0.002, st 0.002) gorunmeli");
 
     temizle(api_url, &mut signer, &pk).await?;
     Ok(())

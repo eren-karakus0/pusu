@@ -20,11 +20,41 @@
 //! (`on_fill parent not found`) ve `trig`'in içine de gömülemiyor
 //! (`invalid action in trigger order`). Watched'da parent gerçek bir emir
 //! olduğu için `of` çalışıyor ve daha güvenli.
+//!
+//! # Çıkışlar: `rng` mi, `tp`/`st` kademeleri mi
+//!
+//! Tek stop + tek hedef → **`rng`** (OCO): bir bacak tetiklenince diğeri
+//! borsada otomatik iptal oluyor. Atomik ve Faz 1'de uçtan uca doğrulandı.
+//!
+//! Kademeli çıkış → **`[tp…, st…]`**. `rng` tek çift taşıdığı için sığmıyor.
+//! OCO kaybı sorun değil, çünkü staging'de ölçüldü (§8.10): fazla boyutlu
+//! koruma emri **kırpılıyor** ve pozisyon kapanınca artakalan koruma emirleri
+//! temizleniyor. Yani kademeler birbirini bozmuyor.
+//!
+//! # ⚠️ `is_buy` tuzağı — burada iki kez ısırıyor
+//!
+//! `Stop`/`TakeProfit`/`TriggerBasket`'te `is_buy`, keychain'in doc'unda
+//! *"true = buy/long side"* diye geçiyor ama **yanlış**: alan **tetik yönü**
+//! ("fiyat eşiğin üstündeyken ateşle"), korunan pozisyonun yönü değil.
+//! Emrin kendi yönünü borsa pozisyondan türetiyor.
+//!
+//! Sonuç: aynı long'u korurken `tp` ile `st` **ters** değer istiyor.
+//!
+//! | Long'u korumak için | `is_buy` | çünkü |
+//! |---|---|---|
+//! | `tp` | `true` | kâr yukarıda, yukarı tetikler |
+//! | `st` | `false` | zarar aşağıda, aşağı tetikler |
+//!
+//! Yanlış değer **hata vermiyor**: borsa `"resting"` + geçerli bir `oid`
+//! döndürüyor, emir hiç var olmuyor. Kullanıcı stop'u olduğunu sanır.
+//! `rng` bu tuzağın dışında — iki tarafı birden taşıdığı için `is_buy`'ı
+//! pozisyon yönü olarak kullanıyor (Faz 1'de doğrulandı).
 
 use bulk_keychain::{
-    Commission, OnFill, Order, OrderItem, OrderType, Pubkey, RangeOco, TriggerBasket,
+    Commission, OnFill, Order, OrderItem, OrderType, Pubkey, RangeOco, Stop, TakeProfit,
+    TriggerBasket,
 };
-use pusu_core::{Alert, AlertAction, Bracket, Condition, Execution, Side, TradeSpec};
+use pusu_core::{Alert, AlertAction, Condition, Execution, Exits, Side, TradeSpec};
 
 /// Derlenmiş alarm: imzalanmaya hazır payload + kimin yürüteceği.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,8 +74,12 @@ pub enum Compiled {
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum CompileError {
     /// Stop/hedef girişin yanlış tarafında — emir dolar dolmaz kendini tetiklerdi.
-    #[error("bracket tutarsız: {0} işlemde stop {1}, hedef {2} olamaz")]
-    IncoherentBracket(&'static str, f64, f64),
+    #[error("çıkışlar tutarsız: {0} işlemde stop'lar hedeflerin yanlış tarafında")]
+    IncoherentExits(&'static str),
+
+    /// Yüzdeler geçersiz (bacak 0..=100 dışında ya da toplam %100'ü aşıyor).
+    #[error("çıkış yüzdeleri geçersiz: her kademe 0-100 arası olmalı, toplam %100'ü aşamaz")]
+    InvalidPercentages,
 
     /// `trig { actions: [l, rng] }` limit book'ta beklerken rng'yi hemen kurar,
     /// yani var olmayan pozisyonu korur. v1'de trigger içinde yalnızca market.
@@ -68,7 +102,7 @@ pub fn compile(alert: &Alert, builder: &str) -> Result<Compiled, CompileError> {
         AlertAction::Trade(spec) => spec,
     };
 
-    validate_bracket(spec)?;
+    validate_exits(spec)?;
 
     match alert.execution() {
         Execution::OnChain => compile_onchain(&alert.condition, spec, builder),
@@ -76,7 +110,7 @@ pub fn compile(alert: &Alert, builder: &str) -> Result<Compiled, CompileError> {
     }
 }
 
-/// 🔒 `trig { c, d, tr, actions: [m{builderCode}, rng] }`
+/// 🔒 `trig { c, d, tr, actions: [m{builderCode}, çıkışlar…] }`
 fn compile_onchain(
     condition: &Condition,
     spec: &TradeSpec,
@@ -94,8 +128,10 @@ fn compile_onchain(
     };
 
     let mut actions = vec![market_entry(spec, builder)?];
-    if let Some(b) = spec.bracket {
-        actions.push(collar(spec, b));
+    if let Some(e) = &spec.exits {
+        // `trig` kademeyi kabul ediyor: staging'de [m, tp, tp, st, st] ile
+        // doğrulandı — dördü de reduce-only olarak dinlenmeye geçti.
+        actions.extend(exit_items(spec, e));
     }
 
     Ok(Compiled::OnChain {
@@ -111,15 +147,15 @@ fn compile_onchain(
     })
 }
 
-/// ⚡ `[m{builderCode}, of{p:0, actions:[rng]}]`
+/// ⚡ `[m{builderCode}, of{p:0, actions:[çıkışlar…]}]`
 fn compile_watched(spec: &TradeSpec, builder: &str) -> Result<Compiled, CompileError> {
     let mut items = vec![market_entry(spec, builder)?];
-    if let Some(b) = spec.bracket {
+    if let Some(e) = &spec.exits {
         // Parent = index 0 (market emri). Gerçek bir emir olduğu için `of`
-        // burada çalışıyor: market reddedilirse bracket hiç kurulmuyor.
+        // burada çalışıyor: market reddedilirse çıkışlar hiç kurulmuyor.
         items.push(OrderItem::OnFill(OnFill {
             p: 0,
-            actions: vec![collar(spec, b)],
+            actions: exit_items(spec, e),
         }));
     }
     Ok(Compiled::Watched { items })
@@ -143,14 +179,29 @@ fn market_entry(spec: &TradeSpec, builder: &str) -> Result<OrderItem, CompileErr
     }))
 }
 
+/// Çıkışları borsa aksiyonlarına çevirir.
+///
+/// Tek stop + tek hedef → `rng` (OCO, atomik, Faz 1'de doğrulanmış).
+/// Kademeli → ayrı `tp`/`st` emirleri.
+fn exit_items(spec: &TradeSpec, e: &Exits) -> Vec<OrderItem> {
+    if e.is_simple() {
+        vec![collar(spec, e.stops[0].price, e.take_profits[0].price)]
+    } else {
+        ladder(spec, e)
+    }
+}
+
 /// Stop + hedefi tek OCO collar'ına çevirir: bir bacak tetiklenince diğeri iptal.
 ///
 /// `collar_min`/`collar_max` fiyat sırasına göre; hangisinin stop hangisinin
 /// hedef olduğu yöne bağlı. Long'da stop altta, short'ta üstte.
-fn collar(spec: &TradeSpec, b: Bracket) -> OrderItem {
+///
+/// `rng`'de `is_buy` gerçekten pozisyonun yönü — `tp`/`st`'deki tetik yönü
+/// tuzağı buraya uygulanmıyor, çünkü `rng` iki tarafı birden taşıyor.
+fn collar(spec: &TradeSpec, stop: f64, take_profit: f64) -> OrderItem {
     let (min, max) = match spec.side {
-        Side::Buy => (b.stop, b.take_profit),
-        Side::Sell => (b.take_profit, b.stop),
+        Side::Buy => (stop, take_profit),
+        Side::Sell => (take_profit, stop),
     };
     OrderItem::RangeOco(RangeOco {
         symbol: spec.symbol.to_string(),
@@ -165,40 +216,73 @@ fn collar(spec: &TradeSpec, b: Bracket) -> OrderItem {
     })
 }
 
-fn validate_bracket(spec: &TradeSpec) -> Result<(), CompileError> {
-    let Some(b) = spec.bracket else {
+/// Kademeli çıkış: her hedef ve stop için ayrı emir.
+///
+/// Boyutlar orijinal pozisyonun yüzdesi olarak sabitleniyor; TP1 dolunca
+/// kalanları küçültmeye gerek yok, çünkü borsa fazla boyutlu korumayı
+/// kırpıyor (§8.10'da ölçüldü).
+///
+/// ⚠️ `is_buy` burada **tetik yönü** — modül dokümanındaki tuzağa bak.
+/// Long'da kâr yukarıda (`tp` → `true`), zarar aşağıda (`st` → `false`).
+/// Ters verirsek borsa `"resting"` deyip emri hiç oluşturmuyor.
+fn ladder(spec: &TradeSpec, e: &Exits) -> Vec<OrderItem> {
+    let yukari = spec.side.is_buy();
+
+    let tps = e.take_profits.iter().map(|leg| {
+        OrderItem::TakeProfit(TakeProfit {
+            symbol: spec.symbol.to_string(),
+            is_buy: yukari,
+            size: leg.size_of(spec.size),
+            trigger_price: leg.price,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    });
+
+    let sts = e.stops.iter().map(|leg| {
+        OrderItem::Stop(Stop {
+            symbol: spec.symbol.to_string(),
+            is_buy: !yukari,
+            size: leg.size_of(spec.size),
+            trigger_price: leg.price,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    });
+
+    tps.chain(sts).collect()
+}
+
+fn validate_exits(spec: &TradeSpec) -> Result<(), CompileError> {
+    let Some(e) = &spec.exits else {
         return Ok(());
     };
-    // Girişi bilmiyoruz (market emri), o yüzden girişe göre değil kendi
-    // içinde tutarlılığı kontrol ediyoruz: long'da stop < hedef, short'ta tersi.
-    let ok = match spec.side {
-        Side::Buy => b.stop < b.take_profit,
-        Side::Sell => b.stop > b.take_profit,
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err(CompileError::IncoherentBracket(
-            spec.side.label(),
-            b.stop,
-            b.take_profit,
-        ))
+    // Borsa fazlasını kırpıyor ama toplamı %100'ü aşan bir ladder'ı sessizce
+    // kabul etmek yanlış: kullanıcı son kademelerin çalışacağını sanır.
+    if !e.pcts_ok() {
+        return Err(CompileError::InvalidPercentages);
     }
+    // Girişi bilmiyoruz (market emri), o yüzden girişe göre değil kendi
+    // içinde tutarlılığı kontrol ediyoruz: long'da her stop her hedefin altında.
+    if !e.is_coherent(spec.side) {
+        return Err(CompileError::IncoherentExits(spec.side.label()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pusu_core::{AlertId, AlertState, Cross, Interval, Symbol};
+    use pusu_core::{AlertId, AlertState, Cross, ExitLeg, Interval, Symbol};
 
     const BUILDER: &str = "AdjWd4DCeKC3P4QjRaP5BmmcPMs1YaQ8kRjPqpnbnqdz";
 
-    fn spec(side: Side, bracket: Option<Bracket>) -> TradeSpec {
+    fn spec(side: Side, exits: Option<Exits>) -> TradeSpec {
         TradeSpec {
             symbol: Symbol::new("BTC-USD"),
             side,
             size: 0.01,
-            bracket,
+            exits,
         }
     }
 
@@ -285,13 +369,7 @@ mod tests {
         // of kullanılamıyor: parent'ı trig olamıyor, trig'e de gömülemiyor.
         let a = alert(
             mark_cross(Cross::Below),
-            AlertAction::Trade(spec(
-                Side::Buy,
-                Some(Bracket {
-                    stop: 87_200.0,
-                    take_profit: 94_000.0,
-                }),
-            )),
+            AlertAction::Trade(spec(Side::Buy, Some(Exits::simple(87_200.0, 94_000.0)))),
         );
         let Compiled::OnChain { items } = compile(&a, BUILDER).unwrap() else {
             panic!()
@@ -312,13 +390,7 @@ mod tests {
         // market reddedilirse rng hiç kurulmaz.
         let a = alert(
             candle_close(),
-            AlertAction::Trade(spec(
-                Side::Buy,
-                Some(Bracket {
-                    stop: 87_200.0,
-                    take_profit: 94_000.0,
-                }),
-            )),
+            AlertAction::Trade(spec(Side::Buy, Some(Exits::simple(87_200.0, 94_000.0)))),
         );
         let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
             panic!("Watched bekleniyordu");
@@ -364,13 +436,7 @@ mod tests {
     fn long_collari_stop_altta_hedef_ustte_kurar() {
         let a = alert(
             candle_close(),
-            AlertAction::Trade(spec(
-                Side::Buy,
-                Some(Bracket {
-                    stop: 87_200.0,
-                    take_profit: 94_000.0,
-                }),
-            )),
+            AlertAction::Trade(spec(Side::Buy, Some(Exits::simple(87_200.0, 94_000.0)))),
         );
         let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
             panic!()
@@ -391,13 +457,7 @@ mod tests {
         // göre olduğu için yer değiştiriyorlar. Karıştırılırsa koruma ters çalışır.
         let a = alert(
             candle_close(),
-            AlertAction::Trade(spec(
-                Side::Sell,
-                Some(Bracket {
-                    stop: 94_000.0,
-                    take_profit: 87_200.0,
-                }),
-            )),
+            AlertAction::Trade(spec(Side::Sell, Some(Exits::simple(94_000.0, 87_200.0)))),
         );
         let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
             panic!()
@@ -414,21 +474,175 @@ mod tests {
     }
 
     #[test]
-    fn ters_bracket_reddedilir() {
+    fn ters_cikis_reddedilir() {
         // Long'da stop hedefin üstündeyse emir dolar dolmaz kendini tetikler.
         let a = alert(
             candle_close(),
-            AlertAction::Trade(spec(
-                Side::Buy,
-                Some(Bracket {
-                    stop: 94_000.0,
-                    take_profit: 87_200.0,
-                }),
-            )),
+            AlertAction::Trade(spec(Side::Buy, Some(Exits::simple(94_000.0, 87_200.0)))),
         );
         assert!(matches!(
             compile(&a, BUILDER),
-            Err(CompileError::IncoherentBracket(..))
+            Err(CompileError::IncoherentExits(..))
+        ));
+    }
+
+    // -- kademeli çıkış -----------------------------------------------------
+
+    /// Kullanıcının kurgusu: TP1 %30, TP2 %70; SL1 %50, SL2 %50.
+    fn ladder_exits() -> Exits {
+        Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 30.0), ExitLeg::new(98_000.0, 70.0)],
+            stops: vec![ExitLeg::new(88_000.0, 50.0), ExitLeg::new(86_000.0, 50.0)],
+        }
+    }
+
+    #[test]
+    fn kademeli_cikis_ayri_tp_ve_st_emirlerine_derlenir() {
+        let a = alert(
+            candle_close(),
+            AlertAction::Trade(spec(Side::Buy, Some(ladder_exits()))),
+        );
+        let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
+            panic!("Watched bekleniyordu");
+        };
+        let OrderItem::OnFill(of) = &items[1] else {
+            panic!("of bekleniyordu");
+        };
+        assert_eq!(of.actions.len(), 4, "2 tp + 2 st");
+        assert!(matches!(of.actions[0], OrderItem::TakeProfit(_)));
+        assert!(matches!(of.actions[1], OrderItem::TakeProfit(_)));
+        assert!(matches!(of.actions[2], OrderItem::Stop(_)));
+        assert!(matches!(of.actions[3], OrderItem::Stop(_)));
+    }
+
+    #[test]
+    fn kademe_yuzdeleri_mutlak_miktara_cevriliyor() {
+        // size 0.01 → TP1 %30 = 0.003, TP2 %70 = 0.007
+        let a = alert(
+            candle_close(),
+            AlertAction::Trade(spec(Side::Buy, Some(ladder_exits()))),
+        );
+        let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
+            panic!()
+        };
+        let OrderItem::OnFill(of) = &items[1] else {
+            panic!()
+        };
+        let OrderItem::TakeProfit(tp1) = &of.actions[0] else {
+            panic!()
+        };
+        let OrderItem::TakeProfit(tp2) = &of.actions[1] else {
+            panic!()
+        };
+        assert!((tp1.size - 0.003).abs() < 1e-12);
+        assert!((tp2.size - 0.007).abs() < 1e-12);
+    }
+
+    #[test]
+    fn longda_tp_yukari_st_asagi_tetikler() {
+        // ⚠️ Ürünün en sinsi tuzağı. `is_buy` = tetik yönü, pozisyon yönü DEĞİL.
+        // Ters verirsek borsa "resting" deyip emri hiç oluşturmuyor —
+        // kullanıcı stop'u olduğunu sanır, yoktur. Staging'de ölçüldü.
+        let a = alert(
+            candle_close(),
+            AlertAction::Trade(spec(Side::Buy, Some(ladder_exits()))),
+        );
+        let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
+            panic!()
+        };
+        let OrderItem::OnFill(of) = &items[1] else {
+            panic!()
+        };
+        let OrderItem::TakeProfit(tp) = &of.actions[0] else {
+            panic!()
+        };
+        let OrderItem::Stop(st) = &of.actions[2] else {
+            panic!()
+        };
+        assert!(tp.is_buy, "long'da kâr yukarıda → tp yukarı tetikler");
+        assert!(!st.is_buy, "long'da zarar aşağıda → st aşağı tetikler");
+    }
+
+    #[test]
+    fn shortta_tetik_yonleri_tersine_doner() {
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(86_000.0, 30.0), ExitLeg::new(82_000.0, 70.0)],
+            stops: vec![ExitLeg::new(94_000.0, 50.0), ExitLeg::new(96_000.0, 50.0)],
+        };
+        let a = alert(
+            candle_close(),
+            AlertAction::Trade(spec(Side::Sell, Some(e))),
+        );
+        let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
+            panic!()
+        };
+        let OrderItem::OnFill(of) = &items[1] else {
+            panic!()
+        };
+        let OrderItem::TakeProfit(tp) = &of.actions[0] else {
+            panic!()
+        };
+        let OrderItem::Stop(st) = &of.actions[2] else {
+            panic!()
+        };
+        assert!(!tp.is_buy, "short'ta kâr aşağıda → tp aşağı tetikler");
+        assert!(st.is_buy, "short'ta zarar yukarıda → st yukarı tetikler");
+    }
+
+    #[test]
+    fn tek_stop_tek_hedef_hala_rngye_derlenir() {
+        // OCO atomik ve Faz 1'de doğrulanmış; en sık hal için onu koruyoruz.
+        let a = alert(
+            candle_close(),
+            AlertAction::Trade(spec(Side::Buy, Some(Exits::simple(87_200.0, 94_000.0)))),
+        );
+        let Compiled::Watched { items } = compile(&a, BUILDER).unwrap() else {
+            panic!()
+        };
+        let OrderItem::OnFill(of) = &items[1] else {
+            panic!()
+        };
+        assert_eq!(of.actions.len(), 1);
+        assert!(matches!(of.actions[0], OrderItem::RangeOco(_)));
+    }
+
+    #[test]
+    fn kademeli_cikis_zincire_de_gomulebiliyor() {
+        // Staging'de doğrulandı: trig { actions: [m, tp, tp, st, st] } kabul
+        // ediliyor, dördü de reduce-only olarak dinlenmeye geçiyor.
+        let a = alert(
+            mark_cross(Cross::Below),
+            AlertAction::Trade(spec(Side::Buy, Some(ladder_exits()))),
+        );
+        let Compiled::OnChain { items } = compile(&a, BUILDER).unwrap() else {
+            panic!("OnChain bekleniyordu");
+        };
+        let OrderItem::TriggerBasket(b) = &items[0] else {
+            panic!()
+        };
+        assert_eq!(b.actions.len(), 5, "1 market + 2 tp + 2 st");
+    }
+
+    #[test]
+    fn yuzde_toplami_100u_asan_ladder_reddedilir() {
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 70.0), ExitLeg::new(98_000.0, 70.0)],
+            stops: vec![],
+        };
+        let a = alert(candle_close(), AlertAction::Trade(spec(Side::Buy, Some(e))));
+        assert_eq!(compile(&a, BUILDER), Err(CompileError::InvalidPercentages));
+    }
+
+    #[test]
+    fn hedeflerin_arasina_dusen_stop_reddedilir() {
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 50.0), ExitLeg::new(98_000.0, 50.0)],
+            stops: vec![ExitLeg::new(96_000.0, 100.0)],
+        };
+        let a = alert(candle_close(), AlertAction::Trade(spec(Side::Buy, Some(e))));
+        assert!(matches!(
+            compile(&a, BUILDER),
+            Err(CompileError::IncoherentExits(..))
         ));
     }
 

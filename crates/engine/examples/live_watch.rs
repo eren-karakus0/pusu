@@ -55,7 +55,7 @@ fn alarm(id: &str, price: f64, cross: Cross, armed_at_ms: u64) -> Alert {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,
             size: 0.001,
-            bracket: None,
+            exits: None,
         }),
         state: AlertState::Armed,
         armed_at_ms,

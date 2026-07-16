@@ -14,8 +14,8 @@
 use bulk_keychain::{Keypair, Signer};
 use pusu_compile::{compile, Compiled};
 use pusu_core::{
-    Alert, AlertAction, AlertId, AlertState, Bracket, Condition, Cross, Interval, Side, Symbol,
-    TradeSpec,
+    Alert, AlertAction, AlertId, AlertState, Condition, Cross, ExitLeg, Exits, Interval, Side,
+    Symbol, TradeSpec,
 };
 
 const API: &str = "https://staging-api.bulk.trade/api/v1";
@@ -26,7 +26,7 @@ struct Keys {
     builder: String,
 }
 
-fn alert(condition: Condition, bracket: Option<Bracket>) -> Alert {
+fn alert(condition: Condition, exits: Option<Exits>) -> Alert {
     Alert {
         id: AlertId::new("live"),
         owner: String::new(),
@@ -37,7 +37,7 @@ fn alert(condition: Condition, bracket: Option<Bracket>) -> Alert {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,
             size: 0.001,
-            bracket,
+            exits,
         }),
         state: AlertState::Armed,
         armed_at_ms: 0,
@@ -98,6 +98,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("{e:?}"))?
         .pubkey()
         .to_base58();
+    let pubkey = Keypair::from_base58(&keys.master)
+        .map_err(|e| format!("{e:?}"))?
+        .pubkey()
+        .to_base58();
     let mut signer = Signer::new(kp);
 
     let px = mark_price().await?;
@@ -111,10 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cross: Cross::Below,
             price: px * 1.05,
         },
-        Some(Bracket {
-            stop: px * 0.90,
-            take_profit: px * 1.10,
-        }),
+        Some(Exits::simple(px * 0.90, px * 1.10)),
     );
 
     let Compiled::OnChain { items } = compile(&a, &builder_pk)? else {
@@ -150,10 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cross: Cross::Above,
             price: 90_000.0,
         },
-        Some(Bracket {
-            stop: px * 0.90,
-            take_profit: px * 1.10,
-        }),
+        Some(Exits::simple(px * 0.90, px * 1.10)),
     );
 
     let Compiled::Watched { items } = compile(&a, &builder_pk)? else {
@@ -178,6 +176,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert!(sonra > once, "fee işlemedi");
 
+    // ─── 3. Kademeli çıkış: TP1 %30 / TP2 %70 + SL1 %50 / SL2 %50 ──────────
+    // Kullanıcının gerçek kurgusu. Birim testler payload'ın şeklini gösteriyor;
+    // burada borsanın gerçekten kabul edip emirleri kurduğunu kanıtlıyoruz.
+    //
+    // Önce 1. ve 2. adımın bıraktığı collar'ları temizle, yoksa sayım şişer.
+    gonder(
+        &mut signer,
+        vec![bulk_keychain::OrderItem::CancelAll(
+            bulk_keychain::CancelAll::all(),
+        )],
+    )
+    .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let mut a = alert(
+        Condition::CandleClose {
+            symbol: Symbol::new("BTC-USD"),
+            interval: Interval::M15,
+            cross: Cross::Above,
+            price: 90_000.0,
+        },
+        Some(Exits {
+            take_profits: vec![ExitLeg::new(px * 1.05, 30.0), ExitLeg::new(px * 1.10, 70.0)],
+            stops: vec![ExitLeg::new(px * 0.92, 50.0), ExitLeg::new(px * 0.90, 50.0)],
+        }),
+    );
+    if let AlertAction::Trade(spec) = &mut a.action {
+        spec.size = 0.004; // kademeler bölünebilsin
+    }
+
+    let Compiled::Watched { items } = compile(&a, &builder_pk)? else {
+        return Err("Watched bekleniyordu".into());
+    };
+    println!("\n=== 3. Kademeli çıkış ([m, of{{p:0,[tp,tp,st,st]}}]) ===");
+    println!("derlenen: {} item", items.len());
+
+    let resp = gonder(&mut signer, items).await?;
+    println!("{resp}");
+    if resp.contains("rejected") || resp.contains("\"ok\":false") {
+        return Err(format!("borsa reddetti: {resp}").into());
+    }
+
+    // ⚠️ "resting" demesi emrin var olduğunu KANITLAMIYOR: yanlış is_buy'lı bir
+    // st de "resting" + geçerli oid döndürüp hiç oluşmuyor. Tek doğrulama yolu
+    // openOrders'ı ayrıca sorgulamak.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    let n = koruma_emirleri(&pubkey).await?;
+    println!("openOrders'da duran koruma emri: {n} (4 bekleniyor)");
+    assert_eq!(
+        n, 4,
+        "kademeler kurulmadı — is_buy tuzağına düşmüş olabiliriz"
+    );
+
     println!("\n✅ domain → compiler → keychain → borsa → fee zinciri çalışıyor");
+    println!("✅ kademeli çıkış borsada kuruldu");
     Ok(())
+}
+
+/// BTC-USD'de duran koruma emirlerinin sayısı.
+///
+/// `openOrders`'ı ayrıca sorgulamak zorundayız: borsa yanlış `is_buy`'lı bir
+/// `st`'ye de `"resting"` + geçerli `oid` dönüyor ama emri hiç oluşturmuyor.
+async fn koruma_emirleri(pubkey: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{API}/account"))
+        .json(&serde_json::json!({ "type": "fullAccount", "user": pubkey }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    Ok(v[0]["fullAccount"]["openOrders"]
+        .as_array()
+        .map_or(0, |os| {
+            os.iter()
+                .filter(|o| {
+                    matches!(
+                        o["orderType"].as_str(),
+                        Some("stop" | "takeProfit" | "range")
+                    )
+                })
+                .count()
+        }))
 }

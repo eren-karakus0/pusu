@@ -49,31 +49,115 @@ pub struct TradeSpec {
     pub size: f64,
     /// Emir dolduğunda otomatik kurulacak koruma. `of` (on-fill) ile
     /// aynı imzalı tx'e gömülür — parent dolmadan çocuklar uykuda bekler.
-    pub bracket: Option<Bracket>,
+    pub exits: Option<Exits>,
 }
 
-/// Giriş dolduğunda kurulacak stop/hedef çifti.
-///
-/// BULK'ta `rng` (OCO) olarak kuruluyor: bir bacak tetiklenince diğeri
-/// otomatik iptal oluyor.
+/// Tek bir çıkış kademesi: hangi fiyattan, pozisyonun ne kadarı.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Bracket {
-    /// Zarar durdur.
-    pub stop: f64,
-    /// Kâr al.
-    pub take_profit: f64,
+pub struct ExitLeg {
+    pub price: f64,
+    /// Pozisyonun yüzdesi (0 < pct <= 100).
+    ///
+    /// Yüzde, mutlak miktar değil — kullanıcı "TP1'de %30 al" diye düşünüyor,
+    /// "0.0012 BTC sat" diye değil. Mutlak boyuta imza anında çevriliyor;
+    /// [`TradeSpec::size`] o an sabit olduğu için sonuç da sabit.
+    pub pct: f64,
 }
 
-impl Bracket {
-    /// Stop ve hedef, girişin doğru taraflarında mı?
-    ///
-    /// Long'da stop girişin altında, hedef üstünde olmalı; short'ta tersi.
-    /// Ters kurulmuş bir bracket, emir dolar dolmaz kendini tetikler.
-    pub fn is_coherent(&self, entry: f64, side: Side) -> bool {
-        match side {
-            Side::Buy => self.stop < entry && self.take_profit > entry,
-            Side::Sell => self.stop > entry && self.take_profit < entry,
+impl ExitLeg {
+    pub fn new(price: f64, pct: f64) -> Self {
+        Self { price, pct }
+    }
+
+    /// Bu kademenin mutlak miktarı.
+    pub fn size_of(&self, position: f64) -> f64 {
+        position * self.pct / 100.0
+    }
+}
+
+/// Giriş dolduğunda kurulacak kademeli çıkışlar.
+///
+/// Kullanıcının gerçek kurgusu tek stop + tek hedef değil: *"TP1 şu seviyede
+/// %30, TP2 şu seviyede %70; SL1 şurada %50, SL2 şurada %50."* Kaç kademe
+/// olacağı kullanıcıya kalmış.
+///
+/// # Neden yüzdeleri giriş anında sabitleyebiliyoruz
+///
+/// Staging'de ölçüldü (§8.10): pozisyondan **büyük** bir koruma emri
+/// reddedilmiyor, **kırpılıyor** — `min(emir, pozisyon)` kadar kapatıyor,
+/// ters pozisyon da açmıyor.
+///
+/// Bu olmasaydı ladder ön-imzalanamazdı: TP1 %30 dolunca pozisyon %70'e
+/// düşer, %100 boyutlu SL reddedilir ve kullanıcı **korumasız** kalırdı.
+/// Kırpma sayesinde her kademe orijinal boyutun yüzdesi olarak imzalanıp
+/// unutulabiliyor; dolum sırasına göre yeniden hesap gerekmiyor. İmzalı blob
+/// zaten değiştirilemez olduğu için bu şart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Exits {
+    pub take_profits: Vec<ExitLeg>,
+    pub stops: Vec<ExitLeg>,
+}
+
+impl Exits {
+    /// Klasik tek stop + tek hedef. `rng` (OCO) olarak derleniyor.
+    pub fn simple(stop: f64, take_profit: f64) -> Self {
+        Self {
+            take_profits: vec![ExitLeg::new(take_profit, 100.0)],
+            stops: vec![ExitLeg::new(stop, 100.0)],
         }
+    }
+
+    /// Tek stop + tek hedef mi? (Derleyici bu hali `rng`'ye çeviriyor.)
+    pub fn is_simple(&self) -> bool {
+        self.take_profits.len() == 1
+            && self.stops.len() == 1
+            && self.take_profits[0].pct == 100.0
+            && self.stops[0].pct == 100.0
+    }
+
+    /// Kademeler kendi içinde tutarlı mı?
+    ///
+    /// Girişi bilmiyoruz (market emri), o yüzden girişe göre değil kendi
+    /// içinde bakıyoruz: long'da **her** stop **her** hedefin altında olmalı.
+    /// Ters kurulmuş bir çıkış, emir dolar dolmaz kendini tetikler.
+    pub fn is_coherent(&self, side: Side) -> bool {
+        let (Some(en_yuksek_stop), Some(en_dusuk_hedef)) = (
+            self.stops.iter().map(|l| l.price).reduce(f64::max),
+            self.take_profits.iter().map(|l| l.price).reduce(f64::min),
+        ) else {
+            // Tek taraflı çıkış (sadece TP ya da sadece SL) geçerli.
+            return true;
+        };
+        match side {
+            Side::Buy => en_yuksek_stop < en_dusuk_hedef,
+            Side::Sell => {
+                let en_dusuk_stop = self.stops.iter().map(|l| l.price).fold(f64::MAX, f64::min);
+                let en_yuksek_hedef = self
+                    .take_profits
+                    .iter()
+                    .map(|l| l.price)
+                    .fold(f64::MIN, f64::max);
+                en_dusuk_stop > en_yuksek_hedef
+            }
+        }
+    }
+
+    /// Yüzdeler mantıklı mı?
+    ///
+    /// Borsa fazlasını kırpıyor ama toplamı %100'ü aşan bir ladder'ı sessizce
+    /// kabul etmek yanlış olur: kullanıcı kapatamayacağı bir miktarı
+    /// kapattığını sanır ve kademelerin bir kısmı hiç çalışmaz.
+    pub fn pcts_ok(&self) -> bool {
+        let bacak_ok = |ls: &[ExitLeg]| ls.iter().all(|l| l.pct > 0.0 && l.pct <= 100.0);
+        let toplam_ok = |ls: &[ExitLeg]| ls.iter().map(|l| l.pct).sum::<f64>() <= 100.0 + 1e-9;
+        bacak_ok(&self.take_profits)
+            && bacak_ok(&self.stops)
+            && toplam_ok(&self.take_profits)
+            && toplam_ok(&self.stops)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.take_profits.is_empty() && self.stops.is_empty()
     }
 }
 
@@ -210,10 +294,7 @@ mod tests {
             symbol: "BTC-USD".into(),
             side: Side::Buy,
             size: 0.01,
-            bracket: Some(Bracket {
-                stop: 87_200.0,
-                take_profit: 94_000.0,
-            }),
+            exits: Some(Exits::simple(87_200.0, 94_000.0)),
         }
     }
 
@@ -290,34 +371,98 @@ mod tests {
     }
 
     #[test]
-    fn long_brackette_stop_altta_hedef_ustte_olmali() {
-        let b = Bracket {
-            stop: 87_200.0,
-            take_profit: 94_000.0,
-        };
-        assert!(b.is_coherent(90_000.0, Side::Buy));
-        // Ters çevrilmişi long için tutarsız.
-        assert!(!b.is_coherent(90_000.0, Side::Sell));
+    fn long_cikista_stop_altta_hedef_ustte_olmali() {
+        let e = Exits::simple(87_200.0, 94_000.0);
+        assert!(e.is_coherent(Side::Buy));
+        // Aynı fiyatlar short için tutarsız.
+        assert!(!e.is_coherent(Side::Sell));
     }
 
     #[test]
-    fn short_brackette_stop_ustte_hedef_altta_olmali() {
-        let b = Bracket {
-            stop: 94_000.0,
-            take_profit: 87_200.0,
-        };
-        assert!(b.is_coherent(90_000.0, Side::Sell));
-        assert!(!b.is_coherent(90_000.0, Side::Buy));
+    fn short_cikista_stop_ustte_hedef_altta_olmali() {
+        let e = Exits::simple(94_000.0, 87_200.0);
+        assert!(e.is_coherent(Side::Sell));
+        assert!(!e.is_coherent(Side::Buy));
     }
 
     #[test]
-    fn stop_girisin_yanlis_tarafindaysa_tutarsiz() {
-        // Emir dolar dolmaz kendini tetikleyecek bir bracket.
-        let b = Bracket {
-            stop: 91_000.0,
-            take_profit: 94_000.0,
+    fn kademeli_cikis_kurulabiliyor() {
+        // Kullanıcının kurgusu: TP1 %30, TP2 %70; SL1 %50, SL2 %50.
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 30.0), ExitLeg::new(98_000.0, 70.0)],
+            stops: vec![ExitLeg::new(88_000.0, 50.0), ExitLeg::new(86_000.0, 50.0)],
         };
-        assert!(!b.is_coherent(90_000.0, Side::Buy));
+        assert!(e.is_coherent(Side::Buy));
+        assert!(e.pcts_ok());
+        assert!(!e.is_simple(), "kademeli — rng'ye sığmaz");
+    }
+
+    #[test]
+    fn kademe_sayisi_serbest() {
+        // Kaç kademe olacağı kullanıcıya kalmış; ikiyle sınırlı değil.
+        let e = Exits {
+            take_profits: (1..=5)
+                .map(|i| ExitLeg::new(94_000.0 + f64::from(i) * 1_000.0, 20.0))
+                .collect(),
+            stops: vec![ExitLeg::new(88_000.0, 100.0)],
+        };
+        assert!(e.is_coherent(Side::Buy));
+        assert!(e.pcts_ok());
+    }
+
+    #[test]
+    fn kademeli_cikista_her_stop_her_hedefin_altinda_olmali() {
+        // SL2 (95k) hedeflerin arasına düşmüş: emir dolar dolmaz tetiklenir.
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 50.0), ExitLeg::new(98_000.0, 50.0)],
+            stops: vec![ExitLeg::new(88_000.0, 50.0), ExitLeg::new(95_000.0, 50.0)],
+        };
+        assert!(!e.is_coherent(Side::Buy));
+    }
+
+    #[test]
+    fn yuzde_toplami_100u_asamaz() {
+        // Borsa fazlasını kırpıyor ama sessizce kabul etmek yanlış: kullanıcı
+        // kapatamayacağı miktarı kapattığını sanır, son kademeler hiç çalışmaz.
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 70.0), ExitLeg::new(98_000.0, 70.0)],
+            stops: vec![],
+        };
+        assert!(!e.pcts_ok());
+    }
+
+    #[test]
+    fn sifir_ve_negatif_yuzde_reddedilir() {
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, 0.0)],
+            stops: vec![],
+        };
+        assert!(!e.pcts_ok());
+
+        let e = Exits {
+            take_profits: vec![ExitLeg::new(94_000.0, -10.0)],
+            stops: vec![],
+        };
+        assert!(!e.pcts_ok());
+    }
+
+    #[test]
+    fn tek_tarafli_cikis_gecerli() {
+        // Sadece stop, hedef yok — tutarlılık kontrolü karşılaştıracak
+        // bir şey bulamayınca reddetmemeli.
+        let e = Exits {
+            take_profits: vec![],
+            stops: vec![ExitLeg::new(88_000.0, 100.0)],
+        };
+        assert!(e.is_coherent(Side::Buy));
+        assert!(e.pcts_ok());
+    }
+
+    #[test]
+    fn kademe_mutlak_miktara_cevriliyor() {
+        // Kullanıcı yüzde düşünüyor, borsa miktar istiyor.
+        assert!((ExitLeg::new(94_000.0, 30.0).size_of(0.004) - 0.0012).abs() < 1e-12);
+        assert!((ExitLeg::new(94_000.0, 100.0).size_of(0.004) - 0.004).abs() < 1e-12);
     }
 
     #[test]
