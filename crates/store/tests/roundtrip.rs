@@ -42,6 +42,13 @@ struct Ortam {
 fn ortam() -> &'static Ortam {
     static ORTAM: OnceLock<Ortam> = OnceLock::new();
     ORTAM.get_or_init(|| {
+        // Blob'lar at-rest şifreli; testlerde sabit bir anahtar yeter.
+        if std::env::var("PUSU_BLOB_KEY").is_err() {
+            std::env::set_var(
+                "PUSU_BLOB_KEY",
+                "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            );
+        }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

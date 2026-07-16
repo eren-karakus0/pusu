@@ -91,6 +91,10 @@ pub enum NodeError {
 /// mutabakatının hatası ise yayılıyor: temiz bir başlangıç yapamadıysak
 /// devam etmek tehlikeli.
 pub async fn run(cfg: Config) -> Result<(), NodeError> {
+    // Blob'ları çözebilmemiz için anahtar şart (api ile AYNI PUSU_BLOB_KEY).
+    // Yoksa hata ilk dispatch'te gecelerce sonra çıkardı; başlangıca çekiyoruz.
+    pusu_store::check_key()?;
+
     let store = Store::connect(&cfg.database_url).await?;
     let klines = HttpKlineSource::new(&cfg.bulk_url);
     let marks = HttpMarkSource::new(&cfg.bulk_url);

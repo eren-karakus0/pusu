@@ -26,6 +26,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("PUSU_DATABASE_URL").map_err(|_| "PUSU_DATABASE_URL tanımlı değil")?;
     let addr = std::env::var("PUSU_API_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
 
+    // Blob'lar at-rest şifreli; anahtar yoksa/bozuksa hemen dur (node ile
+    // AYNI PUSU_BLOB_KEY set edilmeli, yoksa yazılan blob'lar okunamaz).
+    pusu_store::check_key()?;
+
     let store = pusu_store::Store::connect(&database_url).await?;
     let app = pusu_api::router(store);
 

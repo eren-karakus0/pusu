@@ -23,8 +23,10 @@ use pusu_core::{Alert, AlertId};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::Row;
 
+mod crypto;
 mod record;
 
+pub use crypto::check_key;
 use record::state_str;
 pub use record::str_to_state;
 
@@ -36,6 +38,8 @@ pub enum StoreError {
     Serde(#[from] serde_json::Error),
     #[error("alarm bulunamadı: {0}")]
     NotFound(String),
+    #[error("blob şifreleme: {0}")]
+    Crypto(String),
 }
 
 /// Ön-imzalı bir tx'in rolü.
@@ -191,6 +195,9 @@ impl Store {
     }
 
     /// Ön-imzalı blob'u sakla. Alarm başına role başına bir tane.
+    ///
+    /// Payload **at-rest şifreleniyor** (AES-256-GCM): DB sızsa bile emirler
+    /// çözülemez, koşulsuz postalanamaz. Bkz. [`crate::crypto`].
     pub async fn put_blob(
         &self,
         alert_id: &AlertId,
@@ -198,6 +205,7 @@ impl Store {
         nonce: u64,
         payload: &serde_json::Value,
     ) -> Result<(), StoreError> {
+        let ciphertext = crypto::encrypt(payload)?;
         sqlx::query(
             "INSERT INTO presigned_blobs (alert_id, role, nonce, payload) \
              VALUES ($1, $2::blob_role, $3, $4) \
@@ -206,13 +214,13 @@ impl Store {
         .bind(alert_id.as_str())
         .bind(role.as_str())
         .bind(i64_of(nonce))
-        .bind(payload)
+        .bind(&ciphertext)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Bir blob'u getir (göndermek için).
+    /// Bir blob'u getir (göndermek için). At-rest şifreli; burada çözülüyor.
     pub async fn get_blob(
         &self,
         alert_id: &AlertId,
@@ -227,7 +235,10 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| r.get::<serde_json::Value, _>("payload")))
+        match row {
+            Some(r) => Ok(Some(crypto::decrypt(&r.get::<Vec<u8>, _>("payload"))?)),
+            None => Ok(None),
+        }
     }
 
     /// Gönderim niyetini işaretle — blob'u postalaMADAN önce.
