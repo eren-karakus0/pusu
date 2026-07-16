@@ -59,6 +59,8 @@ enum Command {
     ExitLadder,
     /// S12: trig içine kademeli çıkış (tp+tp+st+st) sığıyor mu?
     TrigLadder,
+    /// S13: aynı imzalı blob iki kez gönderilirse ne oluyor? (storage buna bağlı)
+    NonceReplay,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -677,6 +679,7 @@ async fn main() -> eyre::Result<()> {
         Command::OidPredict => cmd_oid_predict(&cli.api_url).await,
         Command::ExitLadder => cmd_exit_ladder(&cli.api_url).await,
         Command::TrigLadder => cmd_trig_ladder(&cli.api_url).await,
+        Command::NonceReplay => cmd_nonce_replay(&cli.api_url).await,
     }
 }
 
@@ -1524,4 +1527,184 @@ async fn cmd_trig_ladder(api_url: &str) -> eyre::Result<()> {
 
     temizle(api_url, &mut signer, &pk).await?;
     Ok(())
+}
+
+/// S13 — Ayni imzali blob iki kez gonderilirse ne oluyor?
+///
+/// Storage tasariminin bagli oldugu soru. Watcher emri gonderip durumu
+/// yazamadan cokerse, yeniden kalkinca alarm hala Armed gorunur ve blob
+/// TEKRAR gonderilir. Kullanici ayni isleme iki kez girer — urunun en pahali
+/// hatasi.
+///
+/// Nonce imzaya dahil ve sabit. Borsa nonce'u tek kullanimlik sayiyorsa
+/// ikinci gonderim reddedilir → blob dogal olarak idempotent → cokme
+/// guvenligi bedava gelir. Saymiyorsa storage'da write-ahead + reconcile
+/// kurmak zorundayiz (gonderim ONCESI niyet kaydi, acilista borsayla
+/// mutabakat).
+///
+/// Varsayamayiz; olcuyoruz.
+async fn cmd_nonce_replay(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Commission, Keypair as KcKeypair, Order, OrderItem, OrderType, Signer as KcSigner,
+        TimeInForce,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    let builder_pk_str = pubkey_of(&keys.builder)?;
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let pk = kp.pubkey().to_base58();
+    let mut signer = KcSigner::new(kp);
+    println!("BTC mark: {px} | hesap: {pk}");
+
+    temizle(api_url, &mut signer, &pk).await?;
+
+    // Dolmayacak bir limit: mark'in %20 altinda alis. Iki kez gonderilirse
+    // defterde iki emir gorunur — sayarak anlariz.
+    let limit_px = (px * 0.80 * 100.0).round() / 100.0;
+    let order = Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: limit_px,
+        size: 0.001,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::Limit {
+            tif: TimeInForce::Gtc,
+        },
+        client_id: None,
+        commission: Some(
+            Commission::new(
+                bulk_keychain::Pubkey::from_base58(&builder_pk_str)
+                    .map_err(|e| eyre::eyre!("{e:?}"))?,
+                2,
+            )
+            .map_err(|e| eyre::eyre!("{e:?}"))?,
+        ),
+    };
+
+    // TEK imza, IKI gonderim — watcher'in cokup tekrar denemesinin taklidi.
+    let signed = signer
+        .sign_group(vec![OrderItem::Order(order)], None)
+        .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+    let body = serde_json::json!({
+        "actions": signed.actions, "nonce": signed.nonce,
+        "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+    });
+
+    // HTTP durumunu da yazdiriyoruz: 504 gibi bir gateway hatasi "nonce
+    // reddedildi" DEGIL, "istek islenmedi" olabilir — ikisi cok farkli.
+    let gonder = || async {
+        let r = reqwest::Client::new()
+            .post(format!("{api_url}/order"))
+            .json(&body)
+            .send()
+            .await?;
+        let st = r.status();
+        let txt = r.text().await?;
+        Ok::<_, reqwest::Error>((st, txt))
+    };
+
+    let (st, txt) = gonder().await?;
+    println!("\n=== 1. gonderim (nonce {}) ===", signed.nonce);
+    println!("HTTP {st} | {txt}");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let n1 = limit_sayisi(api_url, &pk).await?;
+    println!("defterdeki limit emri: {n1}");
+
+    // Ayni blob'u birkac kez deniyoruz: tek bir 504 tesaduf olabilir.
+    println!("\n=== AYNI blob tekrar tekrar gonderiliyor ===");
+    for i in 2..=4 {
+        let (st, txt) = gonder().await?;
+        let kisa: String = txt.chars().take(120).collect();
+        println!("{i}. gonderim → HTTP {st} | {kisa}");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        println!(
+            "   defterdeki limit emri: {}",
+            limit_sayisi(api_url, &pk).await?
+        );
+    }
+
+    let n2 = limit_sayisi(api_url, &pk).await?;
+    println!("\n>>> tekrar gonderim: {n1} → {n2}");
+    if n2 != n1 {
+        println!("❌ TEKRAR EMIR OLUSTU — kullanici ayni isleme iki kez girer.");
+        println!("   Storage'da write-ahead + reconcile SART.");
+        temizle(api_url, &mut signer, &pk).await?;
+        return Ok(());
+    }
+    println!("Tekrar gonderim emir olusturmadi.");
+
+    // ── Dedup neye bakiyor: nonce'a mi, emrin icerigine mi? ─────────────────
+    // Ayrimi bilmek zorundayiz. Icerige bakiyorsa, kullanicinin BIRBIRININ
+    // AYNI iki alarmi (ayni sembol/boyut/fiyat) carpisir ve ikincisi sessizce
+    // hic girmez — bizim urettigimiz bir hata olur.
+    // Ayni emri AYRI AYRI imzaliyoruz: farkli nonce, ayni icerik.
+    println!("\n=== AYNI icerik, FARKLI nonce (iki ayri imza) ===");
+    let ayni_emir = || Order {
+        symbol: "BTC-USD".into(),
+        is_buy: true,
+        price: limit_px,
+        size: 0.001,
+        reduce_only: false,
+        iso: false,
+        order_type: OrderType::Limit {
+            tif: TimeInForce::Gtc,
+        },
+        client_id: None,
+        commission: None,
+    };
+
+    let mut olusan = 0;
+    for i in 1..=2 {
+        let s = signer
+            .sign_group(vec![OrderItem::Order(ayni_emir())], None)
+            .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+        let b = serde_json::json!({
+            "actions": s.actions, "nonce": s.nonce,
+            "account": s.account, "signer": s.signer, "signature": s.signature,
+        });
+        let r = reqwest::Client::new()
+            .post(format!("{api_url}/order"))
+            .json(&b)
+            .send()
+            .await?;
+        let st = r.status();
+        let txt = r.text().await?;
+        let kisa: String = txt.chars().take(110).collect();
+        println!("imza #{i} (nonce {}) → HTTP {st} | {kisa}", s.nonce);
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let n = limit_sayisi(api_url, &pk).await?;
+        println!("   defterdeki limit emri: {n}");
+        olusan = n;
+    }
+
+    println!("\n>>> SONUC");
+    // n2 = tekrar testinden kalan emir; +2 yeni imza bekliyoruz.
+    if olusan == n2 + 2 {
+        println!("✅ Dedup NONCE'a bakiyor, icerige degil.");
+        println!("   → Ayni blob'u tekrar gondermek zararsiz (cokme guvenligi bedava).");
+        println!("   → Birbirinin AYNI iki alarm carpismiyor.");
+    } else {
+        println!(
+            "⚠️ Ayni icerikli iki AYRI imzadan {} emir olustu (2 bekleniyordu).",
+            olusan - n2
+        );
+        println!("   Dedup icerige de bakiyor olabilir — ayni alarmi iki kez kuran");
+        println!("   kullanicinin ikinci emri sessizce girmez. Arastirilmali.");
+    }
+
+    temizle(api_url, &mut signer, &pk).await?;
+    Ok(())
+}
+
+/// Defterde duran limit emirlerinin sayisi.
+async fn limit_sayisi(api_url: &str, pk: &str) -> eyre::Result<usize> {
+    let a = hesap_json(api_url, pk).await?;
+    Ok(a["openOrders"].as_array().map_or(0, |os| {
+        os.iter()
+            .filter(|o| o["orderType"].as_str() == Some("limit"))
+            .count()
+    }))
 }
