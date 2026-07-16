@@ -197,3 +197,68 @@ body {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* Alarm kurma formu */
+.cardhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cardhead h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.badge {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.badge.chain {
+  color: var(--gold-hi);
+  border-color: var(--gold);
+}
+
+.badge.watch {
+  color: var(--ink-soft);
+}
+
+.row {
+  display: flex;
+  gap: 14px;
+}
+
+.row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.field select {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--ink);
+  font-size: 15px;
+  outline: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.field select:focus {
+  border-color: var(--gold);
+}
+
+@media (max-width: 420px) {
+  .row {
+    flex-direction: column;
+    gap: 18px;
+  }
+}

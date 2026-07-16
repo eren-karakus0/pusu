@@ -61,6 +61,14 @@ pub struct PreparedBundle {
     pub cancel: Option<PreparedMessage>,
 }
 
+impl PreparedBundle {
+    /// Girişin oid'i (varsa). Watched alarm store'a yazılırken `alert.entry_oid`
+    /// buraya konuyor — watcher'ın dolum takibi ve mutabakatı buna bağlı.
+    pub fn entry_oid(&self) -> Option<String> {
+        self.entry.as_ref().and_then(entry_oid)
+    }
+}
+
 /// İmzalanmış, POST'a hazır blob'lar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SignedBundle {
@@ -358,6 +366,7 @@ mod tests {
 
         // İptal, GİRİŞ oid'ini hedeflemeli — yoksa yanlış emri iptal eder.
         let beklenen_oid = entry_oid(entry).unwrap();
+        assert_eq!(b.entry_oid().as_deref(), Some(beklenen_oid.as_str()));
         assert_eq!(cancel.actions[0]["cx"]["oid"], beklenen_oid);
         assert_eq!(cancel.actions[0]["cx"]["c"], "BTC-USD");
         // Farklı nonce (nonce tek kullanımlık, §8.11).
