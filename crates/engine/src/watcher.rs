@@ -86,6 +86,8 @@ pub struct Tick {
     pub working: Vec<AlertId>,
     /// İptal koşulu sağlandı — setup bozuldu, alarm düşürüldü.
     pub invalidated: Vec<AlertId>,
+    /// Kullanıcı defterdeki girişi iptal etti — ön-imzalı `cx` gönderildi.
+    pub cancelled: Vec<AlertId>,
     /// Çekilemeyen feed'ler. Boş değilse bu tur eksik değerlendirildi.
     pub feed_errors: Vec<String>,
 }
@@ -264,23 +266,32 @@ impl<K: KlineSource, M: MarkSource, O: OrderSource, D: Dispatch> Watcher<K, M, O
                 // etmiyoruz — pozisyon var ve korumaları kurulu.
                 Some(o) if !o.untouched() => alert.state = AlertState::Fired,
 
-                // Hiç dolmamış. Süresi var mı?
+                // Hiç dolmamış. İptali gerektiren bir sebep var mı?
                 Some(_) => {
-                    let doldu = alert.fill_deadline_ms.is_some_and(|d| now_ms > d);
-                    if !doldu {
+                    // İki tetik: süre doldu (retest gelmedi) ya da kullanıcı
+                    // açıkça iptal istedi. Kullanıcı isteği önceliklidir —
+                    // ikisi birden olsa bile sonuç Cancelled, Missed değil.
+                    let istendi = alert.cancel_requested;
+                    let suresi_doldu = alert.fill_deadline_ms.is_some_and(|d| now_ms > d);
+                    if !istendi && !suresi_doldu {
                         continue; // retest hâlâ gelebilir
                     }
-                    // Süre doldu: ön-imzalı iptali gönder, sonra sor.
-                    // Sıralama önemli — önce emri geri çekiyoruz ki kullanıcı
-                    // cevabını düşünürken beklenmedik bir dolum yaşamasın.
+                    // Ön-imzalı iptali gönder, sonra durumu yaz. Sıralama önemli:
+                    // önce emri geri çekiyoruz ki kullanıcı cevabını düşünürken
+                    // beklenmedik bir dolum yaşamasın.
                     match self.dispatch.cancel(alert).await {
                         Ok(_) => {
-                            alert.state = AlertState::Missed;
-                            tick.missed.push(alert.id.clone());
+                            if istendi {
+                                alert.state = AlertState::Cancelled;
+                                tick.cancelled.push(alert.id.clone());
+                            } else {
+                                alert.state = AlertState::Missed;
+                                tick.missed.push(alert.id.clone());
+                            }
                         }
                         Err(e) => {
-                            // İptal gitmediyse emir hâlâ canlı. Missed demek
-                            // yalan olur: kullanıcı emrin çekildiğini sanır,
+                            // İptal gitmediyse emir hâlâ canlı. Cancelled/Missed
+                            // demek yalan olur: kullanıcı emrin çekildiğini sanır,
                             // oysa dolabilir. Working kalıyor, tekrar denenecek.
                             tick.feed_errors
                                 .push(format!("{}: iptal gönderilemedi: {e}", alert.id.as_str()));
@@ -527,6 +538,7 @@ mod tests {
             armed_at_ms,
             entry_oid: None,
             fill_deadline_ms: None,
+            cancel_requested: false,
         }
     }
 
@@ -868,6 +880,65 @@ mod tests {
         let t = w.tick(&mut alerts, armed + 2_000).await;
         assert_eq!(alerts[0].state, AlertState::Fired);
         assert!(t.working.is_empty());
+    }
+
+    // -- kullanıcı-tetikli iptal (working) ----------------------------------
+
+    #[tokio::test]
+    async fn kullanici_working_alarmi_iptal_edebiliyor() {
+        // Kullanıcı defterde bekleyen girişi iptal etti: süre dolmasa da watcher
+        // ön-imzalı cx'i gönderip Cancelled yapmalı — Missed değil.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Working);
+
+        // Kullanıcı iptal istedi; süre daha dolmadı.
+        alerts[0].cancel_requested = true;
+        let t = w.tick(&mut alerts, armed + 3_000).await;
+
+        assert_eq!(alerts[0].state, AlertState::Cancelled);
+        assert_eq!(t.cancelled, vec![AlertId::new("a1")]);
+        assert!(t.missed.is_empty(), "kullanıcı iptali Missed değil");
+        assert_eq!(w.dispatch.iptal_sayisi(), 1, "ön-imzalı iptal gitmeliydi");
+    }
+
+    #[tokio::test]
+    async fn iptal_istegi_gelse_de_dolan_emir_kazanir() {
+        // Kullanıcı iptal istedi ama emir bu arada doldu: dolum kazanır.
+        // Dolmuş bir pozisyonu "iptal edildi" saymak korumasız bırakırdı.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+        w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Working);
+
+        // İptal istendi AMA emir defterden kayboldu (doldu).
+        alerts[0].cancel_requested = true;
+        *w.orders.0.borrow_mut() = vec![];
+        let t = w.tick(&mut alerts, armed + 3_000).await;
+
+        assert_eq!(
+            alerts[0].state,
+            AlertState::Fired,
+            "dolum iptalden önce geldi"
+        );
+        assert!(t.cancelled.is_empty());
+        assert_eq!(w.dispatch.iptal_sayisi(), 0, "dolan emir iptal edilmemeli");
     }
 
     // -- iptal koşulu -------------------------------------------------------

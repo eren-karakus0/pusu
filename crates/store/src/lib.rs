@@ -141,7 +141,7 @@ impl Store {
     pub async fn load_live(&self) -> Result<Vec<Alert>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, owner, account, state::text AS state, condition, invalidate, \
-                    action, armed_at_ms, entry_oid, fill_deadline_ms \
+                    action, armed_at_ms, entry_oid, fill_deadline_ms, cancel_requested \
              FROM alerts WHERE state IN ('armed','working')",
         )
         .fetch_all(&self.pool)
@@ -159,7 +159,7 @@ impl Store {
     pub async fn list_by_owner(&self, owner: &str) -> Result<Vec<Alert>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, owner, account, state::text AS state, condition, invalidate, \
-                    action, armed_at_ms, entry_oid, fill_deadline_ms \
+                    action, armed_at_ms, entry_oid, fill_deadline_ms, cancel_requested \
              FROM alerts WHERE owner = $1 ORDER BY armed_at_ms DESC",
         )
         .bind(owner)
@@ -319,6 +319,29 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(true)
+    }
+
+    /// Kullanıcının **defterde bekleyen** (working) girişinin iptalini iste.
+    ///
+    /// api'nin borsaya imza yetkisi yok; bayrağı kaldırıyor, watcher bir sonraki
+    /// turda görüp ön-imzalı `cx`'i gönderiyor ([`pusu_core::Alert::cancel_requested`]).
+    /// Owner ve state koşullu: yalnızca sahibinin working alarmı. İşaretlendiyse
+    /// `true`.
+    pub async fn request_cancel(
+        &self,
+        alert_id: &AlertId,
+        owner: &str,
+    ) -> Result<bool, StoreError> {
+        let n = sqlx::query(
+            "UPDATE alerts SET cancel_requested = true, updated_at = now() \
+             WHERE id = $1 AND owner = $2 AND state = 'working'",
+        )
+        .bind(alert_id.as_str())
+        .bind(owner)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
     }
 
     /// Kullanıcının **sonlanmış** alarmını listeden kaldır (satır + blob'lar).

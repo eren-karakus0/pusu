@@ -62,5 +62,6 @@ pub fn row_to_alert(row: &PgRow) -> Result<Alert, StoreError> {
         armed_at_ms: armed_at_ms as u64,
         entry_oid: row.get("entry_oid"),
         fill_deadline_ms: fill_deadline_ms.map(|v| v as u64),
+        cancel_requested: row.get("cancel_requested"),
     })
 }

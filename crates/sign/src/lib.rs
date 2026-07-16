@@ -311,6 +311,7 @@ mod tests {
             armed_at_ms: NONCE,
             entry_oid: None,
             fill_deadline_ms: None,
+            cancel_requested: false,
         }
     }
 

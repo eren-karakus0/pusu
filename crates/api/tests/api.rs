@@ -117,6 +117,7 @@ fn watched_limit(id: &str) -> Alert {
         armed_at_ms: 1_784_000_000_000,
         entry_oid: Some("giris-oid".into()),
         fill_deadline_ms: None,
+        cancel_requested: false,
     }
 }
 
@@ -372,6 +373,41 @@ fn sonlanmis_alarm_listeden_kaldirilabiliyor() {
 
         let (_, list) = iste(&store, "GET", &format!("/alerts?owner={MASTER}"), None).await;
         assert!(list.as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn working_alarm_iptali_watchera_birakiliyor() {
+    // Defterde bekleyen girişin borsada canlı emri var; api imzalayamaz, iptal
+    // isteğini bayrağa yazıp 202 dönüyor — watcher birazdan cx'i gönderecek.
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+        // Alarmı Working'e geçir (watcher limit girişi deftere koymuş gibi).
+        let mut working = a.clone();
+        working.state = AlertState::Working;
+        store.update_runtime(&working).await.unwrap();
+
+        let (status, out) = iste(
+            &store,
+            "POST",
+            &format!("/alerts/a1/cancel?owner={MASTER}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "yanıt: {out}");
+        assert_eq!(out["state"], "cancel_requested");
+
+        // Bayrak kalktı; alarm hâlâ Working (watcher henüz işlemedi).
+        let (_, list) = iste(&store, "GET", &format!("/alerts?owner={MASTER}"), None).await;
+        assert_eq!(list.as_array().unwrap()[0]["cancel_requested"], true);
+        assert_eq!(list.as_array().unwrap()[0]["state"], "working");
     });
 }
 

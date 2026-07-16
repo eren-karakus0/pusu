@@ -44,6 +44,7 @@ fn alert(condition: Condition, exits: Option<Exits>) -> Alert {
         armed_at_ms: 0,
         entry_oid: None,
         fill_deadline_ms: None,
+        cancel_requested: false,
     }
 }
 

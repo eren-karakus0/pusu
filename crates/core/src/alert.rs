@@ -318,6 +318,19 @@ pub struct Alert {
     /// o yüzden limit normal bir GTC emri gibi bekliyor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_deadline_ms: Option<u64>,
+
+    /// Kullanıcı **defterde bekleyen** (Working) girişin iptalini istedi mi?
+    ///
+    /// Working alarmın borsada canlı bir limit emri var; iptali ön-imzalı `cx`'in
+    /// watcher tarafından gönderilmesini gerektiriyor (api'nin imza yetkisi yok).
+    /// Bu yüzden api bayrağı kaldırıyor, watcher bir sonraki turda görüp emri
+    /// geri çekiyor — tam da süre dolunca yaptığı gibi, ama sonuç `Missed` değil
+    /// `Cancelled`. Emir bu arada dolduysa dolum kazanır (bkz. `Watcher::track`).
+    ///
+    /// Armed alarmda anlamsız (henüz borsada emir yok, iptal yerel ve anında);
+    /// yalnızca Working için okunuyor.
+    #[serde(default)]
+    pub cancel_requested: bool,
 }
 
 impl Alert {
@@ -381,6 +394,7 @@ mod tests {
             armed_at_ms: 0,
             entry_oid: None,
             fill_deadline_ms: None,
+            cancel_requested: false,
         }
     }
 

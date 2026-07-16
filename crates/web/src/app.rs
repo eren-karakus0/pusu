@@ -658,7 +658,14 @@ fn AlertList(owner: String, reload: RwSignal<u32>) -> impl IntoView {
 /// orada borsada canlı bir emir var, iptalini watcher yönetiyor.
 #[component]
 fn AlertRow(alert: Alert, owner: String, reload: RwSignal<u32>) -> impl IntoView {
-    let (pill_cls, pill_txt) = state_pill(alert.state);
+    let state = alert.state;
+    // Working alarmın iptali watcher'a bırakılıyor; istek gitmişse "ediliyor".
+    let cancelling = state == AlertState::Working && alert.cancel_requested;
+    let (pill_cls, pill_txt) = if cancelling {
+        ("pill warn", "İptal ediliyor…")
+    } else {
+        state_pill(state)
+    };
     let cond = describe_condition(&alert.condition);
     let act = describe_action(&alert.action);
     let inv = alert.invalidate.is_some();
@@ -666,7 +673,11 @@ fn AlertRow(alert: Alert, owner: String, reload: RwSignal<u32>) -> impl IntoView
     let busy = RwSignal::new(false);
     let err = RwSignal::new(None::<String>);
 
-    let action = if alert.state == AlertState::Armed {
+    // İptal edilebilir: beklemedeki (armed) ya da henüz iptali istenmemiş
+    // defterdeki (working) alarm. Armed yerel, working watcher'a istek bırakır.
+    let cancelable = state == AlertState::Armed || (state == AlertState::Working && !cancelling);
+
+    let action = if cancelable {
         let (id, owner) = (id.clone(), owner.clone());
         let on_cancel = move |_| {
             let (id, owner) = (id.clone(), owner.clone());
@@ -686,7 +697,7 @@ fn AlertRow(alert: Alert, owner: String, reload: RwSignal<u32>) -> impl IntoView
             view! { <button class="ghost" on:click=on_cancel disabled=busy>"İptal et"</button> }
                 .into_any(),
         )
-    } else if alert.state.is_terminal() {
+    } else if state.is_terminal() {
         let (id, owner) = (id.clone(), owner.clone());
         let on_delete = move |_| {
             let (id, owner) = (id.clone(), owner.clone());

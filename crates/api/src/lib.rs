@@ -80,7 +80,12 @@ async fn list_alerts(
     Ok(Json(alerts).into_response())
 }
 
-/// `POST /alerts/{id}/cancel?owner=` — beklemedeki alarmı iptal et.
+/// `POST /alerts/{id}/cancel?owner=` — alarmı iptal et.
+///
+/// İki yol, alarmın durumuna göre:
+/// - **Armed**: borsada emir yok, iptal yerel ve anında → `200` cancelled.
+/// - **Working**: defterde canlı limit emri var; api imzalayamaz, iptal isteğini
+///   watcher'a bırakıyoruz → `202` cancel_requested (watcher birazdan geri çeker).
 async fn cancel_alert(
     State(store): State<Store>,
     Path(id): Path<String>,
@@ -90,15 +95,28 @@ async fn cancel_alert(
         return Err(ApiError::bad("owner gerekli"));
     }
     let aid = AlertId::new(id);
-    if !store.cancel_armed(&aid, &q.owner).await? {
-        return Err(ApiError::conflict(
-            "iptal edilemedi: alarm bulunamadı, sahibi değilsin ya da artık beklemede değil",
-        ));
+
+    if store.cancel_armed(&aid, &q.owner).await? {
+        store
+            .audit(&aid, "cancelled", &json!({ "via": "api" }))
+            .await?;
+        return Ok(Json(json!({ "id": aid.as_str(), "state": "cancelled" })).into_response());
     }
-    store
-        .audit(&aid, "cancelled", &json!({ "via": "api" }))
-        .await?;
-    Ok(Json(json!({ "id": aid.as_str(), "state": "cancelled" })).into_response())
+
+    if store.request_cancel(&aid, &q.owner).await? {
+        store
+            .audit(&aid, "cancel_requested", &json!({ "via": "api" }))
+            .await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({ "id": aid.as_str(), "state": "cancel_requested" })),
+        )
+            .into_response());
+    }
+
+    Err(ApiError::conflict(
+        "iptal edilemedi: alarm bulunamadı, sahibi değilsin ya da sonlanmış",
+    ))
 }
 
 /// `DELETE /alerts/{id}?owner=` — sonlanmış alarmı listeden kaldır.

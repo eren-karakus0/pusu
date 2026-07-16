@@ -119,6 +119,7 @@ fn limit_alarm(id: &str) -> Alert {
         armed_at_ms: ARM_MS,
         entry_oid: None,
         fill_deadline_ms: None,
+        cancel_requested: false,
     }
 }
 

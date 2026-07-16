@@ -196,12 +196,14 @@ fn ozetle(tick: &Tick) {
         || !tick.missed.is_empty()
         || !tick.working.is_empty()
         || !tick.invalidated.is_empty()
+        || !tick.cancelled.is_empty()
     {
         info!(
             fired = tick.fired.len(),
             missed = tick.missed.len(),
             working = tick.working.len(),
             invalidated = tick.invalidated.len(),
+            cancelled = tick.cancelled.len(),
             "tur tamam"
         );
     }

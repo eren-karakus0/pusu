@@ -118,6 +118,7 @@ fn ornek_alarm(id: &str) -> Alert {
         armed_at_ms: 1_784_000_000_000,
         entry_oid: None,
         fill_deadline_ms: None,
+        cancel_requested: false,
     }
 }
 

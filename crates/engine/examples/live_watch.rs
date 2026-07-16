@@ -72,6 +72,7 @@ fn alarm(id: &str, price: f64, cross: Cross, armed_at_ms: u64) -> Alert {
         armed_at_ms,
         entry_oid: None,
         fill_deadline_ms: None,
+        cancel_requested: false,
     }
 }
 

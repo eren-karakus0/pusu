@@ -195,6 +195,7 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
         armed_at_ms: now_ms(),
         entry_oid: None,
         fill_deadline_ms: None,
+        cancel_requested: false,
     })
 }
 
