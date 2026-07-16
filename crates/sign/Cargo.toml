@@ -1,0 +1,15 @@
+[package]
+name = "pusu-sign"
+version = "0.1.0"
+description = "İmza köprüsü: derlenmiş alarmı cüzdanın imzalayacağı mesajlara ve blob'lara çevirir"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+pusu-compile = { path = "../compile" }
+bulk-keychain.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true

@@ -1821,6 +1821,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pusu-sign"
+version = "0.1.0"
+dependencies = [
+ "bulk-keychain",
+ "pusu-compile",
+ "pusu-core",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "pusu-store"
 version = "0.1.0"
 dependencies = [
