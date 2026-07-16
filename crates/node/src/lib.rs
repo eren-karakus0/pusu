@@ -10,9 +10,14 @@
 //!
 //! İkisi birbirini tamamlıyor: `HttpDispatch` çatlağı **bırakabilir**
 //! (niyet yazıldı, POST'tan önce çökme), `reconcile` onu açılışta **kapatır**.
+//!
+//! [`run`] bu ikisini ve saf `pusu-engine` watcher'ını bir olay döngüsünde
+//! birleştiren çalışan düğüm.
 
 mod dispatch;
 mod reconcile;
+mod runner;
 
 pub use dispatch::HttpDispatch;
 pub use reconcile::{reconcile, ReconcileError, Reconciled};
+pub use runner::{run, tur, Config, NodeError};

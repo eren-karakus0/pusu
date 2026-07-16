@@ -14,9 +14,9 @@ use pusu_core::{
     Alert, AlertAction, AlertId, AlertState, Condition, Cross, Entry, Exits, Interval, Side,
     Symbol, TradeSpec,
 };
-use pusu_engine::{Dispatch, DispatchError};
-use pusu_feed::{FeedError, OpenOrder, OrderSource};
-use pusu_node::{reconcile, HttpDispatch};
+use pusu_engine::{Dispatch, DispatchError, Watcher};
+use pusu_feed::{FeedError, Kline, KlineSource, MarkSource, OpenOrder, OrderSource};
+use pusu_node::{reconcile, tur, HttpDispatch};
 use pusu_store::{BlobRole, Store};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::{Mutex, OnceLock};
@@ -335,5 +335,119 @@ fn niyet_post_basarisiz_olsa_bile_isaretleniyor() {
             store.was_dispatched(&a.id, BlobRole::Entry).await.unwrap(),
             "niyet POST'tan önce yazılmalıydı"
         );
+    });
+}
+
+// ── tur: yükle → tick → persist ──────────────────────────────────────────────
+
+struct SahteKline(Vec<Kline>);
+impl KlineSource for SahteKline {
+    async fn klines(
+        &self,
+        _s: &Symbol,
+        _i: Interval,
+        _since: Option<u64>,
+    ) -> Result<Vec<Kline>, FeedError> {
+        Ok(self.0.clone())
+    }
+}
+
+struct SahteMark(f64);
+impl MarkSource for SahteMark {
+    async fn mark(&self, _s: &Symbol) -> Result<f64, FeedError> {
+        Ok(self.0)
+    }
+}
+
+/// Her gönderimi "doldu" sayan sahte borsa.
+struct DolduranBorsa;
+impl Dispatch for DolduranBorsa {
+    async fn submit(&self, _a: &Alert) -> Result<serde_json::Value, DispatchError> {
+        Ok(
+            serde_json::json!({"status":"ok","response":{"data":{"statuses":[
+                {"filled":{"totalSz":0.004,"avgPx":90_500.0,"oid":"x"}}
+            ]}}}),
+        )
+    }
+    async fn cancel(&self, _a: &Alert) -> Result<serde_json::Value, DispatchError> {
+        Ok(serde_json::json!({"status":"ok"}))
+    }
+}
+
+fn market_alarm(id: &str) -> Alert {
+    let mut a = limit_alarm(id);
+    if let AlertAction::Trade(s) = &mut a.action {
+        s.entry = Entry::Market;
+    }
+    a
+}
+
+fn kapanan_mum(close_time: u64, close: f64) -> Kline {
+    Kline {
+        open_time: close_time - Interval::M15.duration_ms(),
+        close_time,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 1.0,
+        num_trades: 1,
+    }
+}
+
+#[test]
+fn tur_ateslenen_alarmi_store_a_yaziyor() {
+    // Uçtan uca kablolama: store'dan yükle → watcher ateşlesin → sonucu geri yaz.
+    calistir(|store| async move {
+        let a = market_alarm("uctan-uca");
+        store.upsert_user(&a.owner).await.unwrap();
+        store.insert_alert(&a).await.unwrap();
+
+        // M15 mumu ARM_MS+1sn'de 90.500'den kapandı (eşik 90.000, üstünde).
+        let mum = kapanan_mum(ARM_MS + 1_000, 90_500.0);
+        let mut watcher = Watcher::new(
+            SahteKline(vec![mum]),
+            SahteMark(90_500.0),
+            SahteEmirler(vec![]),
+            DolduranBorsa,
+        );
+
+        let now = ARM_MS + 2_000;
+        let tick = tur(&store, &mut watcher, now).await.unwrap();
+
+        assert_eq!(tick.fired.len(), 1, "koşul tuttu, ateşlemeliydi");
+        // Fired terminal → artık canlı değil, store'a yazılmış olmalı.
+        assert!(store.load_live().await.unwrap().is_empty());
+        assert!(
+            store.audit_count(&a.id).await.unwrap() >= 1,
+            "durum değişikliği denetime düşmeli"
+        );
+    });
+}
+
+#[test]
+fn tur_kosul_tutmazsa_armed_birakiyor_ve_yazmiyor() {
+    // Eşik geçilmedi: alarm silahlı kalmalı, gereksiz yazım olmamalı.
+    calistir(|store| async move {
+        let a = market_alarm("tutmayan");
+        store.upsert_user(&a.owner).await.unwrap();
+        store.insert_alert(&a).await.unwrap();
+
+        // 89.900 < 90.000 eşiği → ateşlemez.
+        let mum = kapanan_mum(ARM_MS + 1_000, 89_900.0);
+        let mut watcher = Watcher::new(
+            SahteKline(vec![mum]),
+            SahteMark(89_900.0),
+            SahteEmirler(vec![]),
+            DolduranBorsa,
+        );
+
+        let tick = tur(&store, &mut watcher, ARM_MS + 2_000).await.unwrap();
+
+        assert!(tick.fired.is_empty());
+        let canli = store.load_live().await.unwrap();
+        assert_eq!(canli.len(), 1);
+        assert_eq!(canli[0].state, AlertState::Armed);
+        assert_eq!(store.audit_count(&a.id).await.unwrap(), 0, "yazım olmamalı");
     });
 }
