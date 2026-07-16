@@ -11,8 +11,8 @@
 use crate::config::BUILDER_PUBKEY;
 use crate::{api, bulk, wallet};
 use pusu_core::{
-    Alert, AlertAction, AlertId, AlertState, Condition, Cross, Entry, Exits, Interval, Side,
-    Symbol, TradeSpec,
+    Alert, AlertAction, AlertId, AlertState, Condition, Cross, Entry, ExitLeg, Exits, Interval,
+    Side, Symbol, TradeSpec,
 };
 use pusu_sign::{finalize_bundle, prepare_alert, Routing};
 use serde_json::json;
@@ -30,9 +30,11 @@ pub struct Form {
     pub size: f64,
     pub limit_entry: bool,
     pub limit_price: f64,
-    /// 0 → yok. İkisi de doluysa basit stop+hedef (OCO) ekleniyor.
-    pub stop: f64,
-    pub target: f64,
+    /// Kâr al kademeleri: (fiyat, yüzde). Boşsa hedef yok. Tek %100 bacak +
+    /// tek %100 stop → basit OCO (`rng`); fazlası kademeli (`tp`/`st`).
+    pub take_profits: Vec<(f64, f64)>,
+    /// Zarar durdur kademeleri: (fiyat, yüzde). Boşsa stop yok.
+    pub stops: Vec<(f64, f64)>,
     /// İptal (invalidate) koşulu açık mı — setup bozulursa alarmı düşür.
     pub inv_on: bool,
     /// true → eşiğin üstüne çıkarsa iptal; false → altına inerse.
@@ -56,6 +58,48 @@ fn now_ms() -> u64 {
 fn gen_id() -> String {
     let r = (js_sys::Math::random() * 1_000_000.0) as u64;
     format!("{}-{r}", now_ms())
+}
+
+/// Kademe listelerinden `Exits` kur ve doğrula.
+///
+/// İkisi de boşsa çıkış yok (`None`). Doğrulama `core`'un kurallarıyla aynı:
+/// yüzdeler 0-100 ve toplam ≤ %100 (borsa fazlasını kırpsa da sessiz kabul
+/// yanlış olur), stop'lar hedeflerin doğru tarafında (yoksa emir dolar dolmaz
+/// kendini tetikler).
+fn build_exits(
+    tps: &[(f64, f64)],
+    sls: &[(f64, f64)],
+    side: Side,
+) -> Result<Option<Exits>, String> {
+    if tps.is_empty() && sls.is_empty() {
+        return Ok(None);
+    }
+
+    let legs = |xs: &[(f64, f64)]| -> Result<Vec<ExitLeg>, String> {
+        xs.iter()
+            .map(|&(price, pct)| {
+                if price <= 0.0 {
+                    return Err("Çıkış fiyatı geçersiz.".to_string());
+                }
+                if pct <= 0.0 || pct > 100.0 {
+                    return Err("Çıkış yüzdesi 0 ile 100 arasında olmalı.".to_string());
+                }
+                Ok(ExitLeg::new(price, pct))
+            })
+            .collect()
+    };
+
+    let e = Exits {
+        take_profits: legs(tps)?,
+        stops: legs(sls)?,
+    };
+    if !e.pcts_ok() {
+        return Err("Kademe yüzdelerinin toplamı %100'ü aşamaz.".into());
+    }
+    if !e.is_coherent(side) {
+        return Err("Stop ile hedef işlemin yanlış tarafında.".into());
+    }
+    Ok(Some(e))
 }
 
 /// Formu doğrulayıp `Alert`'e çevir.
@@ -98,15 +142,7 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
         Entry::Market
     };
 
-    let exits = if f.stop > 0.0 && f.target > 0.0 {
-        let e = Exits::simple(f.stop, f.target);
-        if !e.is_coherent(f.side) {
-            return Err("Stop ile hedef işlemin yanlış tarafında.".into());
-        }
-        Some(e)
-    } else {
-        None
-    };
+    let exits = build_exits(&f.take_profits, &f.stops, f.side)?;
 
     // İptal koşulu: setup bozulursa alarmı düşür. Anlık mark kullanıyoruz —
     // "setup öldü" olayı bir sonraki mum kapanışını bekleyemez, o anda geçerli.

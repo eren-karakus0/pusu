@@ -274,6 +274,81 @@ body {
   cursor: pointer;
 }
 
+/* Kademeli çıkışlar */
+.legs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.legs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.legs-head .ghost {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.legrow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.legrow input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 15px;
+  outline: none;
+  min-width: 0;
+}
+
+.legrow input:focus {
+  border-color: var(--gold);
+}
+
+.leg-price {
+  flex: 1;
+}
+
+.leg-pct {
+  width: 84px;
+  flex-shrink: 0;
+}
+
+.legx {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  width: 40px;
+  height: 40px;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.legx:hover {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.small {
+  font-size: 12px;
+}
+
 /* Alarm listesi */
 .ghost {
   appearance: none;

@@ -240,8 +240,9 @@ fn AlertBuilder(master: String, sub: String, reload: RwSignal<u32>) -> impl Into
     let size = RwSignal::new(String::new());
     let entry = RwSignal::new("market".to_string());
     let limit_price = RwSignal::new(String::new());
-    let stop = RwSignal::new(String::new());
-    let target = RwSignal::new(String::new());
+    let tps = RwSignal::new(Vec::<LegRow>::new());
+    let sls = RwSignal::new(Vec::<LegRow>::new());
+    let leg_id = RwSignal::new(0usize);
     let inv_on = RwSignal::new(false);
     let inv_dir = RwSignal::new("below".to_string());
     let inv_price = RwSignal::new(String::new());
@@ -263,8 +264,8 @@ fn AlertBuilder(master: String, sub: String, reload: RwSignal<u32>) -> impl Into
             size: num(&size.get()),
             limit_entry: entry.get() == "limit",
             limit_price: num(&limit_price.get()),
-            stop: num(&stop.get()),
-            target: num(&target.get()),
+            take_profits: collect_legs(&tps.get()),
+            stops: collect_legs(&sls.get()),
             inv_on: inv_on.get(),
             inv_above: inv_dir.get() == "above",
             inv_price: num(&inv_price.get()),
@@ -421,24 +422,18 @@ fn AlertBuilder(master: String, sub: String, reload: RwSignal<u32>) -> impl Into
                 }}
             </div>
 
-            <div class="row">
-                <label class="field">
-                    <span>"Stop (opsiyonel)"</span>
-                    <input
-                        r#type="number"
-                        prop:value=move || stop.get()
-                        on:input=move |ev| stop.set(event_target_value(&ev))
-                    />
-                </label>
-                <label class="field">
-                    <span>"Hedef (opsiyonel)"</span>
-                    <input
-                        r#type="number"
-                        prop:value=move || target.get()
-                        on:input=move |ev| target.set(event_target_value(&ev))
-                    />
-                </label>
-            </div>
+            <LegList
+                title="Hedefler — kâr al (opsiyonel)"
+                hint="Kâr hedefi yok. Tek hedef ekle ya da kademele (%50 @ X, %50 @ Y)."
+                legs=tps
+                next_id=leg_id
+            />
+            <LegList
+                title="Stop'lar — zarar durdur (opsiyonel)"
+                hint="Stop yok. Tek stop ekle ya da kademele."
+                legs=sls
+                next_id=leg_id
+            />
 
             <label class="check">
                 <input
@@ -490,6 +485,96 @@ fn AlertBuilder(master: String, sub: String, reload: RwSignal<u32>) -> impl Into
                     .map(|n| view! { <p class=if n.ok { "notice ok" } else { "notice err" }>{n.text}</p> })
             }}
         </section>
+    }
+}
+
+/// Formdaki bir çıkış kademesinin ham girdisi: fiyat + yüzde sinyalleri.
+///
+/// `id` `<For>`'un kararlı anahtarı — kademe silinince doğru satır kalksın.
+/// RwSignal Copy olduğu için tüm yapı Copy; kapanışlara serbestçe taşınıyor.
+#[derive(Clone, Copy)]
+struct LegRow {
+    id: usize,
+    price: RwSignal<String>,
+    pct: RwSignal<String>,
+}
+
+impl LegRow {
+    fn new(id: usize) -> Self {
+        // Yüzde %100 ön-dolu: tek kademeli (basit) hal ekstra tık istemesin.
+        Self {
+            id,
+            price: RwSignal::new(String::new()),
+            pct: RwSignal::new("100".to_string()),
+        }
+    }
+}
+
+/// Kademe satırlarını (fiyat, yüzde) çiftlerine çevir; fiyatsız (yarım
+/// doldurulmuş) satırları at ki eksik kademe göndermeyi engellemesin.
+fn collect_legs(rows: &[LegRow]) -> Vec<(f64, f64)> {
+    rows.iter()
+        .map(|r| (num(&r.price.get()), num(&r.pct.get())))
+        .filter(|&(price, _)| price > 0.0)
+        .collect()
+}
+
+/// Kademeli çıkış girişi: fiyat + yüzde satırları, ekle/çıkar.
+///
+/// Tek %100 kademe basit OCO'ya, fazlası kademeli emirlere derleniyor — ayrımı
+/// derleyici yapıyor, kullanıcı yalnızca kaç kademe istediğini söylüyor.
+#[component]
+fn LegList(
+    title: &'static str,
+    hint: &'static str,
+    legs: RwSignal<Vec<LegRow>>,
+    next_id: RwSignal<usize>,
+) -> impl IntoView {
+    let add = move |_| {
+        let id = next_id.get();
+        next_id.set(id + 1);
+        legs.update(|v| v.push(LegRow::new(id)));
+    };
+
+    view! {
+        <div class="legs">
+            <div class="legs-head">
+                <span>{title}</span>
+                <button class="ghost" on:click=add>"+ Kademe"</button>
+            </div>
+            <For
+                each=move || legs.get()
+                key=|r| r.id
+                children=move |row| {
+                    let (price, pct, id) = (row.price, row.pct, row.id);
+                    view! {
+                        <div class="legrow">
+                            <input
+                                class="leg-price"
+                                r#type="number"
+                                placeholder="fiyat"
+                                prop:value=move || price.get()
+                                on:input=move |ev| price.set(event_target_value(&ev))
+                            />
+                            <input
+                                class="leg-pct"
+                                r#type="number"
+                                placeholder="%"
+                                prop:value=move || pct.get()
+                                on:input=move |ev| pct.set(event_target_value(&ev))
+                            />
+                            <button
+                                class="legx"
+                                on:click=move |_| legs.update(|v| v.retain(|x| x.id != id))
+                            >
+                                "×"
+                            </button>
+                        </div>
+                    }
+                }
+            />
+            {move || legs.get().is_empty().then_some(view! { <p class="muted small">{hint}</p> })}
+        </div>
     }
 }
 
