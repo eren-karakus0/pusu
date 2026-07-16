@@ -1,0 +1,23 @@
+[package]
+name = "pusu-node"
+version = "0.1.0"
+description = "Besteci: store + feed + engine'i gerçek BULK'a bağlayan çalışan düğüm"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+pusu-feed = { path = "../feed" }
+pusu-engine = { path = "../engine" }
+pusu-store = { path = "../store" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
+sqlx = { workspace = true }

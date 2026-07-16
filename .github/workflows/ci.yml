@@ -50,10 +50,10 @@ jobs:
       # spike atılacak kod — ürün crate'lerini denetliyoruz.
       # Ayrıca bulk-client'ın solana bağımlılık ağacı CI'yı gereksiz yere şişiriyor.
       - name: Clippy
-        run: cargo clippy -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store --all-targets
+        run: cargo clippy -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store -p pusu-node --all-targets
 
       - name: Test
-        run: cargo test -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store
+        run: cargo test -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store -p pusu-node
 
       # Örnekler ağa çıkıyor (BULK API'si) — CI'da çalıştırmıyoruz,
       # ama derlenmesi kırılmadığını garanti ediyor.
