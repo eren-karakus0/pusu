@@ -55,6 +55,8 @@ enum Command {
     OnfillRealParent,
     /// S10: oid gönderim ÖNCESİ hesaplanabiliyor mu? (ön-imzalı iptal buna bağlı)
     OidPredict,
+    /// S11: kademeli çıkış — TP1 dolup pozisyon küçülünce büyük kalan SL ne yapıyor?
+    ExitLadder,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -671,6 +673,7 @@ async fn main() -> eyre::Result<()> {
         Command::BracketVariants => cmd_bracket_variants(&cli.api_url).await,
         Command::OnfillRealParent => cmd_onfill_real_parent(&cli.api_url).await,
         Command::OidPredict => cmd_oid_predict(&cli.api_url).await,
+        Command::ExitLadder => cmd_exit_ladder(&cli.api_url).await,
     }
 }
 
@@ -1140,5 +1143,281 @@ async fn cmd_oid_predict(api_url: &str) -> eyre::Result<()> {
             "\n✅ ön-imzalı iptal çalışıyor: kullanıcının 'dolmazsa sor' senaryosu kurulabilir"
         );
     }
+    Ok(())
+}
+
+// ── S11 yardımcıları ────────────────────────────────────────────────────────
+
+async fn hesap_json(api_url: &str, pk: &str) -> eyre::Result<serde_json::Value> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{api_url}/account"))
+        .json(&serde_json::json!({ "type": "fullAccount", "user": pk }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    Ok(v[0]["fullAccount"].clone())
+}
+
+/// BTC-USD pozisyon boyutu (yoksa 0).
+async fn pozisyon(api_url: &str, pk: &str) -> eyre::Result<f64> {
+    let a = hesap_json(api_url, pk).await?;
+    Ok(a["positions"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["symbol"] == "BTC-USD"))
+        .and_then(|p| p["size"].as_f64())
+        .unwrap_or(0.0))
+}
+
+async fn emirleri_yaz(api_url: &str, pk: &str, baslik: &str) -> eyre::Result<()> {
+    let a = hesap_json(api_url, pk).await?;
+    let poz = a["positions"]
+        .as_array()
+        .and_then(|ps| ps.iter().find(|p| p["symbol"] == "BTC-USD"))
+        .and_then(|p| p["size"].as_f64())
+        .unwrap_or(0.0);
+    println!("\n--- {baslik} ---");
+    println!("pozisyon: {poz}");
+    let bos = vec![];
+    let os = a["openOrders"].as_array().unwrap_or(&bos);
+    if os.is_empty() {
+        println!("acik emir yok");
+    }
+    for o in os {
+        println!(
+            "  {} sz={} orig={} filled={} reduceOnly={} trigPx={} pxHi={} status={}",
+            o["orderType"].as_str().unwrap_or("?"),
+            o["size"],
+            o["originalSize"],
+            o["filledSize"],
+            o["reduceOnly"],
+            o["trigger"]["px"],
+            o["trigger"]["pxHi"],
+            o["status"],
+        );
+    }
+    Ok(())
+}
+
+async fn gonder_items(
+    api_url: &str,
+    signer: &mut bulk_keychain::Signer,
+    items: Vec<bulk_keychain::OrderItem>,
+) -> eyre::Result<String> {
+    let signed = signer
+        .sign_group(items, None)
+        .map_err(|e| eyre::eyre!("imza: {e:?}"))?;
+    let body = serde_json::json!({
+        "actions": signed.actions, "nonce": signed.nonce,
+        "account": signed.account, "signer": signed.signer, "signature": signed.signature,
+    });
+    Ok(reqwest::Client::new()
+        .post(format!("{api_url}/order"))
+        .json(&body)
+        .send()
+        .await?
+        .text()
+        .await?)
+}
+
+fn market(sym: &str, is_buy: bool, size: f64, reduce_only: bool) -> bulk_keychain::OrderItem {
+    use bulk_keychain::{Order, OrderItem, OrderType};
+    OrderItem::Order(Order {
+        symbol: sym.into(),
+        is_buy,
+        price: 0.0,
+        size,
+        reduce_only,
+        iso: false,
+        order_type: OrderType::market(),
+        client_id: None,
+        commission: None,
+    })
+}
+
+async fn temizle(api_url: &str, signer: &mut bulk_keychain::Signer, pk: &str) -> eyre::Result<()> {
+    use bulk_keychain::{CancelAll, OrderItem};
+    println!("=== temizlik ===");
+    let _ = gonder_items(
+        api_url,
+        signer,
+        vec![OrderItem::CancelAll(CancelAll::all())],
+    )
+    .await?;
+    let poz = pozisyon(api_url, pk).await?;
+    if poz.abs() > 1e-9 {
+        let r = gonder_items(
+            api_url,
+            signer,
+            vec![market("BTC-USD", poz < 0.0, poz.abs(), true)],
+        )
+        .await?;
+        println!("pozisyon kapatiliyor ({poz}): {}", &r[..r.len().min(120)]);
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    println!("kalan pozisyon: {}", pozisyon(api_url, pk).await?);
+    Ok(())
+}
+
+/// S11 — Kademeli çıkış (TP1 %30 / TP2 %70 + SL) kurulabiliyor mu, ve asıl
+/// soru: TP1 dolup pozisyon küçülünce boyutu büyük kalan SL ne yapıyor?
+///
+/// `Stop`/`TakeProfit` struct'larinda `reduce_only` alani YOK, ama borsa acik
+/// emirlerde `reduceOnly: true` gosteriyor. Reduce-only'nin iki anlami olabilir
+/// ve biri tehlikeli:
+///   (a) kirpar   -> min(emir, pozisyon) kapatir, ladder guvenli
+///   (b) reddeder -> pozisyondan buyuk emir tumden reddedilir; TP1 dolduktan
+///                   sonra SL reddedilir -> KORUMASIZ POZISYON
+/// Varsayamayiz; olcuyoruz.
+async fn cmd_exit_ladder(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        Keypair as KcKeypair, OnFill, OrderItem, Signer as KcSigner, Stop, TakeProfit,
+    };
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    let kp = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let pk = kp.pubkey().to_base58();
+    let mut signer = KcSigner::new(kp);
+    println!("BTC mark: {px} | hesap: {pk}");
+
+    temizle(api_url, &mut signer, &pk).await?;
+
+    let tp = |size: f64, trig: f64| {
+        OrderItem::TakeProfit(TakeProfit {
+            symbol: "BTC-USD".into(),
+            is_buy: true, // korunan pozisyon long
+            size,
+            trigger_price: trig,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    };
+    let st = |size: f64, trig: f64| {
+        OrderItem::Stop(Stop {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            size,
+            trigger_price: trig,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    };
+
+    // ── 1. Ladder kabul ediliyor mu? ────────────────────────────────────────
+    println!("\n=== 1. [m, of p:0 -> tp1 %30 + tp2 %70 + st %100] ===");
+    let r = gonder_items(
+        api_url,
+        &mut signer,
+        vec![
+            market("BTC-USD", true, 0.004, false),
+            OrderItem::OnFill(OnFill {
+                p: 0,
+                actions: vec![
+                    tp(0.0012, px * 1.05),
+                    tp(0.0028, px * 1.10),
+                    st(0.004, px * 0.90),
+                ],
+            }),
+        ],
+    )
+    .await?;
+    println!("{r}");
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    emirleri_yaz(api_url, &pk, "ladder kuruldu mu").await?;
+
+    // ── 2. TP1'i doldur: pozisyon kuculunce SL'e ne oluyor? ─────────────────
+    println!("\n=== 2. TP1 tetikleniyor (pozisyon 0.004 -> 0.0028 olmali) ===");
+    let r = gonder_items(api_url, &mut signer, vec![tp(0.0012, px * 0.999)]).await?;
+    println!("{r}");
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    emirleri_yaz(api_url, &pk, "TP1 sonrasi - SL hala 0.004 mu").await?;
+
+    // ── 3. `st`in yonu ne? ──────────────────────────────────────────────────
+    // 1. adim: st(is_buy=true, trig=px*0.90) "resting" dedi ama openOrders'da
+    // YOK. 3. adim (onceki kosu): st(is_buy=true, trig=px*1.001) duruyor.
+    // Yani is_buy=true olan bir stop, tetigi fiyatin ALTINDAYSA kayboluyor.
+    // Hipotez: `is_buy` = TriggerBasket'teki `d` tuzagi ("esigin ustunde mi?"),
+    // korunan pozisyonun yonu DEGIL. Oyleyse long'u korumak icin is_buy=false
+    // gerekir. Olcuyoruz: long 0.002 acip iki yonu de deniyoruz.
+    println!("\n=== 3. st yonu: long'u korumak icin is_buy ne olmali? ===");
+    temizle(api_url, &mut signer, &pk).await?;
+    let r = gonder_items(
+        api_url,
+        &mut signer,
+        vec![market("BTC-USD", true, 0.002, false)],
+    )
+    .await?;
+    println!("long 0.002: {}", &r[..r.len().min(90)]);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let st_dir = |is_buy: bool, size: f64, trig: f64| {
+        OrderItem::Stop(Stop {
+            symbol: "BTC-USD".into(),
+            is_buy,
+            size,
+            trigger_price: trig,
+            limit_price: f64::NAN,
+            iso: false,
+        })
+    };
+
+    println!(
+        "\n-- is_buy=true, trig={:.0} (fiyatin ALTINDA) --",
+        px * 0.90
+    );
+    let r = gonder_items(api_url, &mut signer, vec![st_dir(true, 0.002, px * 0.90)]).await?;
+    println!("{}", &r[..r.len().min(140)]);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    emirleri_yaz(api_url, &pk, "is_buy=true sonrasi").await?;
+
+    println!(
+        "\n-- is_buy=false, trig={:.0} (fiyatin ALTINDA) --",
+        px * 0.90
+    );
+    let r = gonder_items(api_url, &mut signer, vec![st_dir(false, 0.002, px * 0.90)]).await?;
+    println!("{}", &r[..r.len().min(140)]);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    emirleri_yaz(api_url, &pk, "is_buy=false sonrasi — long'un stopu bu mu?").await?;
+
+    // ── 4. ASIL SORU: pozisyondan BUYUK koruma ne yapiyor? ──────────────────
+    // Stop yerine TakeProfit kullaniyoruz: 2. adimda kanitlandi ki tetigi
+    // zaten gecilmis bir tp HEMEN atesliyor. Stop'un yonu belirsiz oldugu
+    // icin (bkz. 1/3. adim) soruyu tp ile soruyoruz — cevap ayni mekanizmayi
+    // (reduce-only koruma emri) sinar.
+    println!("\n=== 4. pozisyondan BUYUK koruma: kirpar mi, reddeder mi, ters mi acar? ===");
+    temizle(api_url, &mut signer, &pk).await?;
+
+    println!("long 0.002 aciliyor, ardindan 0.006'lik tp (3 KATI) tetikleniyor");
+    let r = gonder_items(
+        api_url,
+        &mut signer,
+        vec![market("BTC-USD", true, 0.002, false)],
+    )
+    .await?;
+    println!("giris: {}", &r[..r.len().min(100)]);
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    println!("pozisyon: {}", pozisyon(api_url, &pk).await?);
+
+    // Long tp: fiyat tetigin USTUNDE olunca atesler. px*0.999 zaten gecilmis.
+    let r = gonder_items(api_url, &mut signer, vec![tp(0.006, px * 0.999)]).await?;
+    println!("tp(0.006): {r}");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let son = pozisyon(api_url, &pk).await?;
+    emirleri_yaz(api_url, &pk, "buyuk tp sonrasi").await?;
+    println!("\n>>> SONUC: son pozisyon = {son} (giris 0.002, koruma 0.006 idi)");
+    if son.abs() < 1e-9 {
+        println!("KIRPIYOR - pozisyon kadar kapatti, ters acmadi. Ladder guvenli.");
+    } else if (son - 0.002).abs() < 1e-9 {
+        println!("REDDETTI - pozisyon duruyor. KORUMASIZ POZISYON riski!");
+    } else if son < 0.0 {
+        println!("TERS ACTI - {son} short. Boyutlari elle yonetmek zorundayiz.");
+    } else {
+        println!("beklenmedik: {son}");
+    }
+
+    temizle(api_url, &mut signer, &pk).await?;
     Ok(())
 }
