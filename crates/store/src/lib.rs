@@ -146,6 +146,25 @@ impl Store {
         rows.iter().map(record::row_to_alert).collect()
     }
 
+    /// Bir kullanıcının **tüm** alarmları, en yeni önce.
+    ///
+    /// `load_live`'dan farkı: terminal alarmları (fired/missed/cancelled…) da
+    /// getirir, çünkü liste ekranı kullanıcının ne kurduğunu ve sonucunu
+    /// göstermek için var. Blob'lar dönmüyor — imzalı gövdeleri istemciye geri
+    /// vermeye gerek yok, alarmın kendisi yeter.
+    pub async fn list_by_owner(&self, owner: &str) -> Result<Vec<Alert>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, owner, account, state::text AS state, condition, invalidate, \
+                    action, armed_at_ms, entry_oid, fill_deadline_ms \
+             FROM alerts WHERE owner = $1 ORDER BY armed_at_ms DESC",
+        )
+        .bind(owner)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(record::row_to_alert).collect()
+    }
+
     /// Bir alarmın değişen alanlarını yaz. Watcher her tur sonunda çağırıyor.
     ///
     /// Yalnızca watcher'ın değiştirdiği alanlar: state, entry_oid,

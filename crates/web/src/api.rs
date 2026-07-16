@@ -4,6 +4,7 @@
 //! burası yalnızca watcher'ın yürüteceği alarmları PUSU sunucusuna iletiyor.
 
 use crate::config::PUSU_API_URL;
+use pusu_core::Alert;
 use serde_json::Value;
 
 /// İmzalı alarm + blob gövdesini `POST /alerts`'e gönder.
@@ -23,4 +24,25 @@ pub async fn create_alert(body: &Value) -> Result<(), String> {
         .as_str()
         .unwrap_or("alarm kaydedilemedi")
         .to_string())
+}
+
+/// Kullanıcının alarmlarını `GET /alerts?owner=`'dan çek (en yeni önce).
+///
+/// Yalnızca Watched alarmlar döner — OnChain olanları borsa tutuyor, PUSU
+/// saklamıyor. Liste ekranı bunu kullanıcıya açıkça söylüyor.
+pub async fn list_alerts(owner: &str) -> Result<Vec<Alert>, String> {
+    let url = format!("{PUSU_API_URL}/alerts?owner={owner}");
+    let resp = gloo_net::http::Request::get(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.ok() {
+        let v: Value = resp.json().await.unwrap_or(Value::Null);
+        return Err(v["error"]
+            .as_str()
+            .unwrap_or("alarmlar yüklenemedi")
+            .to_string());
+    }
+    resp.json::<Vec<Alert>>().await.map_err(|e| e.to_string())
 }

@@ -215,3 +215,63 @@ fn blob_hesabi_uyusmazsa_reddediliyor() {
         assert!(out["error"].as_str().unwrap().contains("uyuşmuyor"));
     });
 }
+
+#[test]
+fn alarmlar_sahibine_gore_en_yeni_once_listeleniyor() {
+    calistir(|store| async move {
+        // İki alarm kur (uçtan uca POST yoluyla).
+        let a1 = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a1, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+
+        let mut a2 = watched_limit("a2");
+        a2.armed_at_ms = a1.armed_at_ms + 1_000; // daha yeni
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a2, Some(blob(SUB, 3)), Some(blob(SUB, 4)))),
+        )
+        .await;
+
+        let (status, out) = iste(&store, "GET", &format!("/alerts?owner={MASTER}"), None).await;
+        assert_eq!(status, StatusCode::OK);
+        let arr = out.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "a2", "en yeni önce");
+        assert_eq!(arr[1]["id"], "a1");
+        // İmzalı blob'lar listeye sızmıyor.
+        assert!(arr[0].get("entry").is_none());
+    });
+}
+
+#[test]
+fn baska_sahibin_alarmi_listede_gorunmez() {
+    calistir(|store| async move {
+        let a = watched_limit("a1");
+        iste(
+            &store,
+            "POST",
+            "/alerts",
+            Some(create_body(&a, Some(blob(SUB, 1)), Some(blob(SUB, 2)))),
+        )
+        .await;
+
+        let (status, out) = iste(&store, "GET", "/alerts?owner=baskasi", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(out.as_array().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn owner_belirtilmezse_reddediliyor() {
+    calistir(|store| async move {
+        let (status, _) = iste(&store, "GET", "/alerts", None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    });
+}

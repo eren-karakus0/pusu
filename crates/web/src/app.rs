@@ -5,11 +5,11 @@
 //! ([`crate::onboarding`], [`crate::alert`]); bu dosya durum + görünüm.
 
 use leptos::prelude::*;
-use pusu_core::{Interval, Side};
+use pusu_core::{Alert, AlertAction, AlertState, Condition, Cross, Entry, Interval, Side};
 use wasm_bindgen_futures::spawn_local;
 
 use crate::alert::{self, Placed};
-use crate::{config, onboarding, wallet};
+use crate::{api, config, onboarding, wallet};
 
 #[derive(Clone)]
 struct Notice {
@@ -55,7 +55,7 @@ pub fn App() -> impl IntoView {
                 if approved.get() {
                     let m = master.get().unwrap_or_default();
                     let s = sub.get().unwrap_or_default();
-                    view! { <AlertBuilder master=m sub=s /> }.into_any()
+                    view! { <Dashboard master=m sub=s /> }.into_any()
                 } else {
                     view! { <Onboarding master sub approved /> }.into_any()
                 }
@@ -230,7 +230,7 @@ fn Onboarding(
 }
 
 #[component]
-fn AlertBuilder(master: String, sub: String) -> impl IntoView {
+fn AlertBuilder(master: String, sub: String, reload: RwSignal<u32>) -> impl IntoView {
     let symbol = RwSignal::new("BTC-USD".to_string());
     let ctype = RwSignal::new("candle".to_string());
     let interval = RwSignal::new("1h".to_string());
@@ -281,11 +281,17 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
         let master = master.clone();
         let sub = sub.clone();
         spawn_local(async move {
-            let text = match alert::submit(alert, &master, &sub).await {
+            let result = alert::submit(alert, &master, &sub).await;
+            let text = match &result {
                 Ok(Placed::OnChain) => (true, "Borsaya kuruldu — borsa tutuyor.".to_string()),
                 Ok(Placed::Watched) => (true, "Kuruldu — watcher izliyor.".to_string()),
-                Err(e) => (false, e),
+                Err(e) => (false, e.clone()),
             };
+            // Watched başarıyla kaydedildiyse liste yenilensin. OnChain store'a
+            // girmediği için listede görünmez — yenilemeye gerek yok.
+            if matches!(result, Ok(Placed::Watched)) {
+                reload.update(|n| *n += 1);
+            }
             notice.set(Some(Notice {
                 ok: text.0,
                 text: text.1,
@@ -484,5 +490,164 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
                     .map(|n| view! { <p class=if n.ok { "notice ok" } else { "notice err" }>{n.text}</p> })
             }}
         </section>
+    }
+}
+
+/// Onboarding sonrası ana ekran: alarm kur + kurulanları listele.
+///
+/// İkisi bir `reload` sayacını paylaşıyor: yeni alarm kaydedilince builder
+/// sayacı artırıyor, liste yeniden çekiyor. Tek yönlü, basit.
+#[component]
+fn Dashboard(master: String, sub: String) -> impl IntoView {
+    let reload = RwSignal::new(0u32);
+    let owner = master.clone();
+    view! {
+        <AlertBuilder master=master sub=sub reload=reload />
+        <AlertList owner=owner reload=reload />
+    }
+}
+
+/// Kullanıcının alarmları + durumları. `reload` artınca yeniden çeker.
+#[component]
+fn AlertList(owner: String, reload: RwSignal<u32>) -> impl IntoView {
+    let alerts = RwSignal::new(Vec::<Alert>::new());
+    let loading = RwSignal::new(true);
+    let error = RwSignal::new(None::<String>);
+
+    Effect::new(move |_| {
+        reload.get(); // bağımlılık: sayaç artınca yeniden çek
+        let owner = owner.clone();
+        loading.set(true);
+        error.set(None);
+        spawn_local(async move {
+            match api::list_alerts(&owner).await {
+                Ok(list) => alerts.set(list),
+                Err(e) => error.set(Some(e)),
+            }
+            loading.set(false);
+        });
+    });
+
+    let refresh = move |_| reload.update(|n| *n += 1);
+
+    view! {
+        <section class="card">
+            <div class="cardhead">
+                <h2>"Alarmlarım"</h2>
+                <button class="ghost" on:click=refresh>"Yenile"</button>
+            </div>
+
+            {move || {
+                if loading.get() {
+                    view! { <p class="muted">"Yükleniyor…"</p> }.into_any()
+                } else if let Some(e) = error.get() {
+                    view! { <p class="notice err">{e}</p> }.into_any()
+                } else if alerts.get().is_empty() {
+                    view! {
+                        <p class="muted">"Henüz alarm kurmadın. Yukarıdan ilkini kur."</p>
+                    }
+                    .into_any()
+                } else {
+                    let rows = alerts.get().iter().map(alert_row).collect::<Vec<_>>();
+                    view! { <ul class="alist">{rows}</ul> }.into_any()
+                }
+            }}
+
+            <p class="muted">
+                "🔒 Borsada yaşayan alarmlar burada listelenmez — onları borsa tutuyor, "
+                "sunucumuz ölse de çalışırlar."
+            </p>
+        </section>
+    }
+}
+
+/// Tek bir alarm satırı: koşul + işlem + durum rozeti.
+fn alert_row(a: &Alert) -> impl IntoView {
+    let (pill_cls, pill_txt) = state_pill(a.state);
+    let cond = describe_condition(&a.condition);
+    let act = describe_action(&a.action);
+    let inv = a.invalidate.is_some();
+    view! {
+        <li class="arow">
+            <div class="arow-main">
+                <span class="arow-cond">{cond}</span>
+                <span class="arow-sub">
+                    {act}
+                    {inv.then_some(" · iptal koşullu")}
+                </span>
+            </div>
+            <span class=pill_cls>{pill_txt}</span>
+        </li>
+    }
+}
+
+/// Fiyatı temiz göster: tam sayıysa ondalık basma.
+fn fmt_price(p: f64) -> String {
+    if p.fract() == 0.0 {
+        format!("{p:.0}")
+    } else {
+        format!("{p}")
+    }
+}
+
+fn cross_sym(c: Cross) -> &'static str {
+    match c {
+        Cross::Above => ">",
+        Cross::Below => "<",
+    }
+}
+
+fn describe_condition(c: &Condition) -> String {
+    match c {
+        Condition::MarkCross {
+            symbol,
+            cross,
+            price,
+        } => format!(
+            "{} · anlık {} {}",
+            symbol.as_str(),
+            cross_sym(*cross),
+            fmt_price(*price)
+        ),
+        Condition::CandleClose {
+            symbol,
+            interval,
+            cross,
+            price,
+        } => format!(
+            "{} · {} kapanış {} {}",
+            symbol.as_str(),
+            interval.label(),
+            cross_sym(*cross),
+            fmt_price(*price)
+        ),
+        Condition::All(_) => "çok koşullu (tümü sağlanmalı)".to_string(),
+        Condition::Any(_) => "çok koşullu (biri sağlanmalı)".to_string(),
+    }
+}
+
+fn describe_action(a: &AlertAction) -> String {
+    match a {
+        AlertAction::Trade(s) => {
+            let entry = match s.entry {
+                Entry::Market => "market".to_string(),
+                Entry::Limit { price } => format!("limit {}", fmt_price(price)),
+            };
+            format!("{} {} · {} giriş", s.side.label(), s.size, entry)
+        }
+        AlertAction::Notify => "bildirim".to_string(),
+    }
+}
+
+/// Durum → (CSS sınıfı, kullanıcı metni).
+fn state_pill(s: AlertState) -> (&'static str, &'static str) {
+    match s {
+        AlertState::Armed => ("pill live", "Bekliyor"),
+        AlertState::Working => ("pill live", "Defterde bekliyor"),
+        AlertState::Fired => ("pill ok", "İşlem girdi"),
+        AlertState::Missed => ("pill warn", "Kaçırıldı"),
+        AlertState::Cancelled => ("pill muted", "İptal edildi"),
+        AlertState::Rejected => ("pill err", "Reddedildi"),
+        AlertState::Uncertain => ("pill warn", "Belirsiz — bak"),
     }
 }

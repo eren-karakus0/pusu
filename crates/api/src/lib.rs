@@ -14,7 +14,7 @@
 //! auth Faz 2'de eklenecek — şimdilik staging.)
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -50,11 +50,28 @@ pub struct BlobIn {
 pub fn router(store: Store) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
-        .route("/alerts", post(create_alert))
+        .route("/alerts", post(create_alert).get(list_alerts))
         // Tarayıcı farklı origin'den çağırıyor. Staging'de gevşek; prod'da
         // frontend origin'ine daraltılacak.
         .layer(CorsLayer::permissive())
         .with_state(store)
+}
+
+/// `GET /alerts?owner=<pubkey>` — kullanıcının alarmlarını listele.
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    owner: String,
+}
+
+async fn list_alerts(
+    State(store): State<Store>,
+    Query(q): Query<ListQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let alerts = store.list_by_owner(&q.owner).await?;
+    Ok(Json(alerts).into_response())
 }
 
 async fn create_alert(
