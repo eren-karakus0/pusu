@@ -242,6 +242,9 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
     let limit_price = RwSignal::new(String::new());
     let stop = RwSignal::new(String::new());
     let target = RwSignal::new(String::new());
+    let inv_on = RwSignal::new(false);
+    let inv_dir = RwSignal::new("below".to_string());
+    let inv_price = RwSignal::new(String::new());
     let busy = RwSignal::new(false);
     let notice = RwSignal::new(None::<Notice>);
 
@@ -262,6 +265,9 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
             limit_price: num(&limit_price.get()),
             stop: num(&stop.get()),
             target: num(&target.get()),
+            inv_on: inv_on.get(),
+            inv_above: inv_dir.get() == "above",
+            inv_price: num(&inv_price.get()),
         };
         let alert = match alert::build_alert(&form, &master, &sub) {
             Ok(a) => a,
@@ -288,8 +294,10 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
         });
     };
 
+    // Rozet Alert::execution()'ı yansıtıyor: iptal koşulu olan alarm borsaya
+    // bırakılamaz (trigger kendini iptal edemez), mum kapanışı da zincirde yok.
     let badge = move || {
-        if ctype.get() == "candle" {
+        if inv_on.get() || ctype.get() == "candle" {
             ("badge watch", "⚡ Watcher yürütür")
         } else {
             ("badge chain", "🔒 Borsa yürütür")
@@ -425,6 +433,44 @@ fn AlertBuilder(master: String, sub: String) -> impl IntoView {
                     />
                 </label>
             </div>
+
+            <label class="check">
+                <input
+                    r#type="checkbox"
+                    prop:checked=move || inv_on.get()
+                    on:change=move |ev| inv_on.set(event_target_checked(&ev))
+                />
+                <span>"Setup bozulursa iptal et"</span>
+            </label>
+
+            {move || {
+                inv_on.get().then(|| view! {
+                    <div class="row">
+                        <label class="field">
+                            <span>"İptal yönü"</span>
+                            <select
+                                prop:value=move || inv_dir.get()
+                                on:change=move |ev| inv_dir.set(event_target_value(&ev))
+                            >
+                                <option value="below">"Altına inerse"</option>
+                                <option value="above">"Üstüne çıkarsa"</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>"İptal fiyatı"</span>
+                            <input
+                                r#type="number"
+                                prop:value=move || inv_price.get()
+                                on:input=move |ev| inv_price.set(event_target_value(&ev))
+                            />
+                        </label>
+                    </div>
+                    <p class="muted">
+                        "İptal koşulu anlık fiyata bakar — setup öldüğü an alarm düşer, "
+                        "işlem hiç girmez. Bu alarm borsaya bırakılamaz; PUSU izler."
+                    </p>
+                })
+            }}
 
             <p class="muted">
                 {format!("Girişte {} bps builder fee. Koruma emirleri (stop/hedef) ücretsiz.", config::BUILDER_FEE_BPS)}

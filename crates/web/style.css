@@ -256,6 +256,24 @@ body {
   border-color: var(--gold);
 }
 
+/* İptal koşulu anahtarı */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.check input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--gold);
+  cursor: pointer;
+}
+
 @media (max-width: 420px) {
   .row {
     flex-direction: column;

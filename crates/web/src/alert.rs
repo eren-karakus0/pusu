@@ -33,6 +33,11 @@ pub struct Form {
     /// 0 → yok. İkisi de doluysa basit stop+hedef (OCO) ekleniyor.
     pub stop: f64,
     pub target: f64,
+    /// İptal (invalidate) koşulu açık mı — setup bozulursa alarmı düşür.
+    pub inv_on: bool,
+    /// true → eşiğin üstüne çıkarsa iptal; false → altına inerse.
+    pub inv_above: bool,
+    pub inv_price: f64,
 }
 
 /// Alarmın nereye yerleştiği — kullanıcıya geri bildirim.
@@ -103,12 +108,46 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
         None
     };
 
+    // İptal koşulu: setup bozulursa alarmı düşür. Anlık mark kullanıyoruz —
+    // "setup öldü" olayı bir sonraki mum kapanışını bekleyemez, o anda geçerli.
+    let invalidate = if f.inv_on {
+        if f.inv_price <= 0.0 {
+            return Err("İptal fiyatı geçersiz.".into());
+        }
+        // Karşı yönlü koruyucu iptal, tetik eşiğinin yanlış tarafındaysa alarm
+        // koşul tutmadan anında iptal olur; kullanıcı sessizce kaybeder.
+        let opposite = f.above != f.inv_above;
+        let wrong_side = if f.above {
+            f.inv_price >= f.price
+        } else {
+            f.inv_price <= f.price
+        };
+        if opposite && wrong_side {
+            return Err(
+                "İptal seviyesi tetik eşiğinin yanlış tarafında — alarm anında iptal olurdu."
+                    .into(),
+            );
+        }
+        let inv_cross = if f.inv_above {
+            Cross::Above
+        } else {
+            Cross::Below
+        };
+        Some(Condition::MarkCross {
+            symbol: symbol.clone(),
+            cross: inv_cross,
+            price: f.inv_price,
+        })
+    } else {
+        None
+    };
+
     Ok(Alert {
         id: AlertId::new(gen_id()),
         owner: owner.into(),
         account: account.into(),
         condition,
-        invalidate: None,
+        invalidate,
         action: AlertAction::Trade(TradeSpec {
             symbol,
             side: f.side,
