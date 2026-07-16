@@ -1,0 +1,19 @@
+[package]
+name = "pusu-store"
+version = "0.1.0"
+description = "Kalıcı durum: alarmlar, ön-imzalı blob'lar, denetim kaydı"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+sqlx = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

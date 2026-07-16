@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/spike"]
+members = ["crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/spike", "crates/store"]
 
 [workspace.package]
 edition = "2021"
@@ -25,3 +25,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "json", "macros", "migrate"] }

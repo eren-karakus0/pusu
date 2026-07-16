@@ -13,6 +13,28 @@ jobs:
   check:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
+
+    # pusu-store entegrasyon testleri gerçek Postgres'e karşı çalışıyor.
+    # Linux CI'da localhost olduğu için hızlı (Windows Docker Desktop'taki
+    # port-forward yavaşlığı yok).
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: pusu
+          POSTGRES_PASSWORD: pusu
+          POSTGRES_DB: pusu
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pusu"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PUSU_TEST_DB: postgres://pusu:pusu@localhost:5432/pusu
+
     steps:
       - uses: actions/checkout@v5
 
@@ -28,10 +50,10 @@ jobs:
       # spike atılacak kod — ürün crate'lerini denetliyoruz.
       # Ayrıca bulk-client'ın solana bağımlılık ağacı CI'yı gereksiz yere şişiriyor.
       - name: Clippy
-        run: cargo clippy -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine --all-targets
+        run: cargo clippy -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store --all-targets
 
       - name: Test
-        run: cargo test -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine
+        run: cargo test -p pusu-core -p pusu-feed -p pusu-compile -p pusu-engine -p pusu-store
 
       # Örnekler ağa çıkıyor (BULK API'si) — CI'da çalıştırmıyoruz,
       # ama derlenmesi kırılmadığını garanti ediyor.
