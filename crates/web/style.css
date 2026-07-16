@@ -1,0 +1,199 @@
+/* BULK paleti: koyu kahve zemin, bej metin, gold vurgu — pastel premium. */
+:root {
+  --bg: #17120d;
+  --bg-2: #1f1810;
+  --card: #241c13;
+  --line: #3a2e1f;
+  --ink: #ece3d2;
+  --ink-soft: #b6a98f;
+  --muted: #8a7c64;
+  --gold: #cba24e;
+  --gold-hi: #e0bd72;
+  --ok: #a9c48a;
+  --err: #d69a76;
+  --radius: 16px;
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #2a2013 0%, transparent 60%),
+    var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell {
+  width: 100%;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.mark {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--gold);
+}
+
+.tag {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* Adım rayı */
+.rail {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 10px;
+  counter-reset: step;
+}
+
+.rail .step {
+  flex: 1;
+  counter-increment: step;
+  font-size: 12px;
+  color: var(--muted);
+  padding-top: 12px;
+  border-top: 2px solid var(--line);
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.rail .step::before {
+  content: counter(step) ". ";
+  color: inherit;
+}
+
+.rail .step.now {
+  color: var(--gold-hi);
+  border-top-color: var(--gold);
+}
+
+.rail .step.done {
+  color: var(--ink-soft);
+  border-top-color: var(--gold);
+}
+
+/* Kart */
+.card {
+  background: linear-gradient(180deg, var(--card), var(--bg-2));
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.lead {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.lead.ok {
+  color: var(--ok);
+}
+
+.muted {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.field input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--ink);
+  font-size: 16px;
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--gold);
+}
+
+.cta {
+  appearance: none;
+  border: none;
+  border-radius: 12px;
+  padding: 14px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1206;
+  background: linear-gradient(180deg, var(--gold-hi), var(--gold));
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.05s;
+}
+
+.cta:hover {
+  filter: brightness(1.05);
+}
+
+.cta:active {
+  transform: translateY(1px);
+}
+
+.cta:disabled {
+  filter: grayscale(0.5) brightness(0.7);
+  cursor: progress;
+}
+
+.notice {
+  margin: 0;
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+}
+
+.notice.ok {
+  color: var(--ok);
+  border-color: #4a5a38;
+}
+
+.notice.err {
+  color: var(--err);
+  border-color: #6a4632;
+}
+
+.accounts {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,28 @@
+[package]
+name = "pusu-web"
+version = "0.1.0"
+description = "PUSU tarayıcı arayüzü — Leptos CSR; cüzdanla imza, onboarding"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# Yalnızca wasm hedefine derlenir (web-sys/wasm-bindgen host'ta derlenmez).
+# Workspace default-members'tan çıkarıldı; CI ayrı bir wasm adımıyla derliyor.
+
+[dependencies]
+pusu-core = { path = "../core" }
+pusu-sign = { path = "../sign" }
+
+leptos = { version = "0.8", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window"] }
+gloo-net = "0.6"
+bs58 = "0.5"
+serde_json.workspace = true
+console_error_panic_hook = "0.1"
+
+# bulk-keychain'in transitif getrandom'u wasm'da js feature'ı istiyor.
+getrandom = { version = "0.2", features = ["js"] }

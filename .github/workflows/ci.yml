@@ -41,6 +41,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
 
@@ -59,3 +60,8 @@ jobs:
       # ama derlenmesi kırılmadığını garanti ediyor.
       - name: Örnekler derleniyor mu
         run: cargo check -p pusu-feed -p pusu-compile -p pusu-engine --examples
+
+      # pusu-web yalnızca wasm'a derlenir (web-sys/wasm-bindgen host'ta olmaz).
+      # Clippy hem derlemeyi hem lint'i tek adımda doğruluyor.
+      - name: Web (wasm) clippy
+        run: cargo clippy -p pusu-web --target wasm32-unknown-unknown
