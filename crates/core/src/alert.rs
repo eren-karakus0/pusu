@@ -36,6 +36,34 @@ impl AlertAction {
     }
 }
 
+/// Koşul tuttuğunda emir nasıl girilecek?
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Entry {
+    /// Piyasa fiyatından, hemen. Doldu demek girdi demek.
+    Market,
+
+    /// Belirtilen fiyattan bekle (retest).
+    ///
+    /// Kullanıcının kurgusu: *"15m'de 10'un üstünde kapatsın, sonra retest'te
+    /// benim emrimi alsın."* İki ihtimal var ve ikincisi ürünün işi:
+    ///
+    /// 1. Retest gelir → emir dolar → işlem girer
+    /// 2. Retest gelmez, hacimli gider → emir **dolmaz** → bir periyot sonra
+    ///    ön-imzalı iptal gönderilip kullanıcıya "kaçırdın, hâlâ istiyor
+    ///    musun?" diye sorulur ([`AlertState::Working`])
+    ///
+    /// İkincisi olmadan emir sonsuza dek defterde asılı kalır ve kullanıcı
+    /// günler sonra, senaryosu çoktan bozulmuşken doldurulur.
+    Limit { price: f64 },
+}
+
+impl Entry {
+    pub const fn is_limit(&self) -> bool {
+        matches!(self, Self::Limit { .. })
+    }
+}
+
 /// Tetiklendiğinde girilecek işlem.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TradeSpec {
@@ -47,6 +75,7 @@ pub struct TradeSpec {
     /// gibi dinamik bir ifade imzalanamaz, çünkü tetiklendiği andaki bakiyeyi
     /// bugünden bilemeyiz.
     pub size: f64,
+    pub entry: Entry,
     /// Emir dolduğunda otomatik kurulacak koruma. `of` (on-fill) ile
     /// aynı imzalı tx'e gömülür — parent dolmadan çocuklar uykuda bekler.
     pub exits: Option<Exits>,
@@ -167,6 +196,17 @@ impl Exits {
 pub enum AlertState {
     /// Koşul bekleniyor.
     Armed,
+
+    /// Limit giriş gönderildi, **defterde dolmayı bekliyor**.
+    ///
+    /// Nihai değil: watcher izlemeye devam ediyor. Dolarsa [`Self::Fired`],
+    /// periyot dolduğu hâlde dolmazsa ön-imzalı iptal gönderilip
+    /// [`Self::Missed`] oluyor.
+    ///
+    /// Market girişte bu durum hiç görülmüyor — market emri ya dolar ya
+    /// reddedilir, beklemez.
+    Working,
+
     /// Koşul sağlandı, emir gönderildi.
     Fired,
     /// Kullanıcı iptal etti.
@@ -199,16 +239,25 @@ pub enum AlertState {
     ///
     /// Sessizce düşürmüyoruz: kullanıcıya "kaçırdın, hâlâ istiyor musun?"
     /// diye soruluyor. Kararı o veriyor, biz onun adına işleme girmiyoruz.
+    ///
+    /// İki yoldan buraya düşülüyor:
+    /// 1. Koşul çok geç görüldü (watcher düşmüştü)
+    /// 2. Limit giriş bir periyot boyunca dolmadı — retest gelmedi
     Missed,
 }
 
 impl AlertState {
-    /// Bu durum nihai mi? (Nihaiyse watcher bir daha göndermez.)
+    /// Bu durum nihai mi? (Nihaiyse watcher bir daha dokunmaz.)
     pub const fn is_terminal(&self) -> bool {
         matches!(
             self,
             Self::Fired | Self::Cancelled | Self::Rejected | Self::Uncertain | Self::Missed
         )
+    }
+
+    /// Watcher'ın hâlâ ilgilenmesi gereken bir durum mu?
+    pub const fn is_live(&self) -> bool {
+        matches!(self, Self::Armed | Self::Working)
     }
 }
 
@@ -248,6 +297,27 @@ pub struct Alert {
     /// kapanış bulunan bir watcher yeni alarmı kurulduğu saniye ateşler ve
     /// kullanıcıyı bir saat önceki fiyata dayanarak işleme sokar.
     pub armed_at_ms: u64,
+
+    /// Limit girişin `oid`'i — **imza anında** hesaplanır.
+    ///
+    /// Watcher'ın dolumu takip edebilmesi ve dolmazsa iptal edebilmesi için
+    /// şart. Staging'de doğrulandı (§8.9): `oid = SHA256(seqno ‖
+    /// bincode(action) ‖ account ‖ nonce)`, yani gönderimden **önce**
+    /// biliniyor. Bu sayede iptal de ön-imzalanabiliyor — sunucuya imza
+    /// yetkisi vermeden.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_oid: Option<String>,
+
+    /// Limit girişin dolması için son an (unix ms).
+    ///
+    /// Kullanıcının kuralı: *"saatlik girdiysek 1 saat, 15m'lik girdiysek 15
+    /// dakika sonra sor."* Pencere koşulun periyodundan geliyor; ateşleme
+    /// anında hesaplanıp buraya yazılıyor.
+    ///
+    /// `None` = süre sınırı yok. Mark tabanlı koşulda periyot kavramı yok,
+    /// o yüzden limit normal bir GTC emri gibi bekliyor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_deadline_ms: Option<u64>,
 }
 
 impl Alert {
@@ -294,6 +364,7 @@ mod tests {
             symbol: "BTC-USD".into(),
             side: Side::Buy,
             size: 0.01,
+            entry: Entry::Market,
             exits: Some(Exits::simple(87_200.0, 94_000.0)),
         }
     }
@@ -308,6 +379,8 @@ mod tests {
             action,
             state: AlertState::Armed,
             armed_at_ms: 0,
+            entry_oid: None,
+            fill_deadline_ms: None,
         }
     }
 

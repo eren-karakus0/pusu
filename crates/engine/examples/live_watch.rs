@@ -13,10 +13,11 @@
 //! ```
 
 use pusu_core::{
-    Alert, AlertAction, AlertId, AlertState, Condition, Cross, Interval, Side, Symbol, TradeSpec,
+    Alert, AlertAction, AlertId, AlertState, Condition, Cross, Entry, Interval, Side, Symbol,
+    TradeSpec,
 };
 use pusu_engine::{Dispatch, DispatchError, Watcher};
-use pusu_feed::{HttpKlineSource, HttpMarkSource, MarkSource};
+use pusu_feed::{HttpKlineSource, HttpMarkSource, HttpOrderSource, MarkSource};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> u64 {
@@ -34,6 +35,15 @@ impl Dispatch for SahteBorsa {
         Ok(
             serde_json::json!({"status":"ok","response":{"data":{"statuses":[
                 {"filled":{"totalSz":0.001,"avgPx":0.0,"oid":"sahte"}}
+            ]}}}),
+        )
+    }
+
+    async fn cancel(&self, alert: &Alert) -> Result<serde_json::Value, DispatchError> {
+        println!("      → [sahte iptal] alarm {}", alert.id.as_str());
+        Ok(
+            serde_json::json!({"status":"ok","response":{"data":{"statuses":[
+                {"cancelled":{"oid":"sahte"}}
             ]}}}),
         )
     }
@@ -55,10 +65,13 @@ fn alarm(id: &str, price: f64, cross: Cross, armed_at_ms: u64) -> Alert {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,
             size: 0.001,
+            entry: Entry::Market,
             exits: None,
         }),
         state: AlertState::Armed,
         armed_at_ms,
+        entry_oid: None,
+        fill_deadline_ms: None,
     }
 }
 
@@ -95,6 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut w = Watcher::new(
         HttpKlineSource::new(&base),
         HttpMarkSource::new(&base),
+        HttpOrderSource::new(&base),
         SahteBorsa,
     );
 

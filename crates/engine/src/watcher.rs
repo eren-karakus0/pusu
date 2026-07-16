@@ -29,20 +29,32 @@
 //! monotonluk koruması [`Snapshot::set_close`]'a taşındı.
 
 use crate::outcome::{interpret, Outcome};
-use crate::snapshot::{evaluate, evidence, Snapshot};
-use pusu_core::{Alert, AlertId, AlertState, Condition, Interval, Symbol};
-use pusu_feed::{last_closed, KlineSource, MarkSource};
+use crate::snapshot::{evaluate, evidence, Evidence, Snapshot};
+use pusu_core::{Alert, AlertAction, AlertId, AlertState, Condition, Interval, Symbol};
+use pusu_feed::{last_closed, KlineSource, MarkSource, OrderSource};
 use std::collections::HashSet;
 
-/// Ön-imzalı tx'i borsaya gönderen taraf.
+/// Ön-imzalı tx'leri borsaya gönderen taraf.
 ///
 /// Trait olmasının sebebi sadece test değil: watcher'ın **imza yetkisi yok**.
-/// Elindeki blob kullanıcının tarayıcıda imzaladığı, değiştirilemez bir paket.
-/// Watcher yalnızca "şimdi gönder" diyebiliyor.
+/// Elindeki blob'lar kullanıcının tarayıcıda imzaladığı, değiştirilemez
+/// paketler. Watcher yalnızca "şimdi gönder" diyebiliyor.
 #[allow(async_fn_in_trait)]
 pub trait Dispatch {
-    /// Alarmın ön-imzalı tx'ini gönder, borsanın ham yanıtını döndür.
+    /// Alarmın ön-imzalı giriş tx'ini gönder, borsanın ham yanıtını döndür.
     async fn submit(&self, alert: &Alert) -> Result<serde_json::Value, DispatchError>;
+
+    /// Alarmın ön-imzalı **iptal** tx'ini gönder.
+    ///
+    /// Bu da kullanıcının imzası. Mümkün olmasının sebebi `oid`'in gönderim
+    /// öncesi hesaplanabilmesi (§8.9): `oid = SHA256(seqno ‖ bincode(action) ‖
+    /// account ‖ nonce)`. Böylece kullanıcı girişi imzalarken iptalini de
+    /// imzalıyor; watcher sadece zamanı geldiğinde postalıyor.
+    ///
+    /// Alternatifler kabul edilemezdi: sunucuya imza yetkisi vermek custody
+    /// olurdu, `cxa` (cancel-all) ise dolmuş bir pozisyonun bracket'ini de
+    /// öldürürdü.
+    async fn cancel(&self, alert: &Alert) -> Result<serde_json::Value, DispatchError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -65,27 +77,33 @@ pub struct Report {
 pub struct Tick {
     /// Gönderilen alarmlar ve sonuçları.
     pub fired: Vec<Report>,
-    /// Koşulu tuttu ama **çok geç görüldü** — emir gönderilmedi.
-    /// Kullanıcıya "kaçırdın, hâlâ istiyor musun?" diye sorulacak.
+    /// Kaçırıldı — kullanıcıya "hâlâ istiyor musun?" diye sorulacak.
+    ///
+    /// İki yoldan doluyor: koşul çok geç görüldü (watcher düşmüştü), ya da
+    /// limit giriş bir periyot boyunca dolmadı (retest gelmedi).
     pub missed: Vec<AlertId>,
+    /// Limit giriş deftere kondu, dolum bekleniyor.
+    pub working: Vec<AlertId>,
     /// İptal koşulu sağlandı — setup bozuldu, alarm düşürüldü.
     pub invalidated: Vec<AlertId>,
     /// Çekilemeyen feed'ler. Boş değilse bu tur eksik değerlendirildi.
     pub feed_errors: Vec<String>,
 }
 
-pub struct Watcher<K, M, D> {
+pub struct Watcher<K, M, O, D> {
     klines: K,
     marks: M,
+    orders: O,
     dispatch: D,
     snapshot: Snapshot,
 }
 
-impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
-    pub fn new(klines: K, marks: M, dispatch: D) -> Self {
+impl<K: KlineSource, M: MarkSource, O: OrderSource, D: Dispatch> Watcher<K, M, O, D> {
+    pub fn new(klines: K, marks: M, orders: O, dispatch: D) -> Self {
         Self {
             klines,
             marks,
+            orders,
             dispatch,
             snapshot: Snapshot::default(),
         }
@@ -96,6 +114,7 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
         let mut tick = Tick::default();
         self.refresh(alerts, now_ms, &mut tick).await;
         self.fire(alerts, now_ms, &mut tick).await;
+        self.track(alerts, now_ms, &mut tick).await;
         tick
     }
 
@@ -183,9 +202,18 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
             // edildiyse alarm işini yapmıştır. İşlemin ne olduğu (doldu mu,
             // koruma kuruldu mu) rapordaki `outcome`'da duruyor.
             alert.state = match &outcome {
-                Outcome::Filled { .. } | Outcome::FilledUnprotected { .. } | Outcome::Resting => {
-                    AlertState::Fired
+                Outcome::Filled { .. } | Outcome::FilledUnprotected { .. } => AlertState::Fired,
+
+                // Limit giriş deftere kondu ama dolmadı: iş bitmedi.
+                // Kullanıcı retest bekliyor; gelmezse haber vereceğiz.
+                Outcome::Resting if limit_giris(alert) => {
+                    alert.fill_deadline_ms = fill_deadline(alert, &self.snapshot, now_ms);
+                    tick.working.push(alert.id.clone());
+                    AlertState::Working
                 }
+                // Market emri "resting" dönerse tuhaf ama emir kabul edilmiş.
+                Outcome::Resting => AlertState::Fired,
+
                 Outcome::Rejected { .. } => AlertState::Rejected,
                 // Ne olduğunu bilmiyoruz. Fired demek uydurma, Armed bırakmak
                 // ise bir sonraki turda aynı emri tekrar gönderir — kullanıcı
@@ -200,9 +228,94 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
         }
     }
 
+    /// Defterde bekleyen limit girişleri izle.
+    ///
+    /// Kullanıcının kuralı: *"retest gelip emrimi alabilir; gelmez de hacimli
+    /// giderse 15m sonra bana sor."* Burası o sorunun sorulduğu yer.
+    async fn track(&mut self, alerts: &mut [Alert], now_ms: u64, tick: &mut Tick) {
+        for alert in alerts.iter_mut() {
+            if alert.state != AlertState::Working {
+                continue;
+            }
+            let Some(oid) = alert.entry_oid.clone() else {
+                // İzleyemediğimiz bir emri "dolmadı" sayıp iptal edemeyiz.
+                tick.feed_errors
+                    .push(format!("{}: entry_oid yok, izlenemiyor", alert.id.as_str()));
+                continue;
+            };
+
+            let acik = match self.orders.open_orders(&alert.account).await {
+                Ok(os) => os,
+                Err(e) => {
+                    // Emirleri göremiyorsak karar veremeyiz. Dolmadı sanıp
+                    // iptal etmek, dolmuş bir pozisyonu korumasız bırakırdı.
+                    tick.feed_errors
+                        .push(format!("{} açık emirler: {e}", alert.account));
+                    continue;
+                }
+            };
+
+            match acik.iter().find(|o| o.oid == oid) {
+                // Defterde yok → doldu (ya da kullanıcı kendi iptal etti).
+                // Her iki halde de bizim yapacağımız bir şey kalmadı.
+                None => alert.state = AlertState::Fired,
+
+                // Kısmen dolmuş: emir "alınmış". Süre dolsa bile iptal
+                // etmiyoruz — pozisyon var ve korumaları kurulu.
+                Some(o) if !o.untouched() => alert.state = AlertState::Fired,
+
+                // Hiç dolmamış. Süresi var mı?
+                Some(_) => {
+                    let doldu = alert.fill_deadline_ms.is_some_and(|d| now_ms > d);
+                    if !doldu {
+                        continue; // retest hâlâ gelebilir
+                    }
+                    // Süre doldu: ön-imzalı iptali gönder, sonra sor.
+                    // Sıralama önemli — önce emri geri çekiyoruz ki kullanıcı
+                    // cevabını düşünürken beklenmedik bir dolum yaşamasın.
+                    match self.dispatch.cancel(alert).await {
+                        Ok(_) => {
+                            alert.state = AlertState::Missed;
+                            tick.missed.push(alert.id.clone());
+                        }
+                        Err(e) => {
+                            // İptal gitmediyse emir hâlâ canlı. Missed demek
+                            // yalan olur: kullanıcı emrin çekildiğini sanır,
+                            // oysa dolabilir. Working kalıyor, tekrar denenecek.
+                            tick.feed_errors
+                                .push(format!("{}: iptal gönderilemedi: {e}", alert.id.as_str()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Snapshot'a dışarıdan bakmak isteyenler için (sağlık ucu, testler).
     pub const fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+}
+
+fn limit_giris(alert: &Alert) -> bool {
+    matches!(&alert.action, AlertAction::Trade(s) if s.entry.is_limit())
+}
+
+/// Limit girişin dolması için son an.
+///
+/// Pencere koşulun periyodu: kullanıcı "15m'de kapatınca gir" dediyse 15
+/// dakika, "saatlikte" dediyse 1 saat. Kanıtın penceresini yeniden
+/// kullanıyoruz — aynı soru: bu kuralın geçerlilik süresi ne?
+///
+/// Sayaç **gönderim anından** başlıyor, mumun kapanışından değil: kullanıcı
+/// emrin girmesinden itibaren bir periyot bekliyor.
+///
+/// `None` = süresiz. Mark tabanlı koşulda periyot kavramı yok; limit normal
+/// bir GTC emri gibi bekler.
+fn fill_deadline(alert: &Alert, snap: &Snapshot, now_ms: u64) -> Option<u64> {
+    match evidence(&alert.condition, snap, alert.armed_at_ms) {
+        Some(Evidence::At { window_ms, .. }) => Some(now_ms + window_ms),
+        _ => None,
     }
 }
 
@@ -213,7 +326,7 @@ impl<K: KlineSource, M: MarkSource, D: Dispatch> Watcher<K, M, D> {
 fn ihtiyaclar(alerts: &[Alert]) -> (HashSet<(Symbol, Interval)>, HashSet<Symbol>) {
     let mut candles = HashSet::new();
     let mut marks = HashSet::new();
-    for a in alerts.iter().filter(|a| a.state == AlertState::Armed) {
+    for a in alerts.iter().filter(|a| a.state.is_live()) {
         topla(&a.condition, &mut candles, &mut marks);
         // İptal koşulunun feed'i unutulursa iptal hiç değerlendirilemez ve
         // sessizce çalışmaz — kullanıcı korunduğunu sanır.
@@ -245,7 +358,7 @@ fn topla(c: &Condition, candles: &mut HashSet<(Symbol, Interval)>, marks: &mut H
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pusu_core::{AlertAction, Cross, Side, TradeSpec};
+    use pusu_core::{AlertAction, Cross, Entry, Side, TradeSpec};
     use std::cell::RefCell;
 
     // -- sahte altyapı ------------------------------------------------------
@@ -285,22 +398,84 @@ mod tests {
     struct SahteBorsa {
         yanit: serde_json::Value,
         gonderilen: RefCell<Vec<AlertId>>,
+        iptaller: RefCell<Vec<AlertId>>,
+        iptal_patlar: bool,
     }
     impl SahteBorsa {
         fn new(yanit: serde_json::Value) -> Self {
             Self {
                 yanit,
                 gonderilen: RefCell::new(vec![]),
+                iptaller: RefCell::new(vec![]),
+                iptal_patlar: false,
+            }
+        }
+        fn iptal_patlayan(yanit: serde_json::Value) -> Self {
+            Self {
+                iptal_patlar: true,
+                ..Self::new(yanit)
             }
         }
         fn sayi(&self) -> usize {
             self.gonderilen.borrow().len()
+        }
+        fn iptal_sayisi(&self) -> usize {
+            self.iptaller.borrow().len()
         }
     }
     impl Dispatch for SahteBorsa {
         async fn submit(&self, alert: &Alert) -> Result<serde_json::Value, DispatchError> {
             self.gonderilen.borrow_mut().push(alert.id.clone());
             Ok(self.yanit.clone())
+        }
+        async fn cancel(&self, alert: &Alert) -> Result<serde_json::Value, DispatchError> {
+            if self.iptal_patlar {
+                return Err(DispatchError::Network("iptal gitmedi".into()));
+            }
+            self.iptaller.borrow_mut().push(alert.id.clone());
+            Ok(
+                serde_json::json!({"status":"ok","response":{"data":{"statuses":[
+                    {"cancelled":{"oid":"x"}}
+                ]}}}),
+            )
+        }
+    }
+
+    /// Defterde duran emirleri taklit eder.
+    #[derive(Default)]
+    struct SahteEmirler(RefCell<Vec<pusu_feed::OpenOrder>>);
+    impl SahteEmirler {
+        fn duran(oid: &str, filled: f64) -> Self {
+            Self(RefCell::new(vec![pusu_feed::OpenOrder {
+                oid: oid.into(),
+                symbol: "BTC-USD".into(),
+                size: 0.01,
+                filled,
+                order_type: "limit".into(),
+                reduce_only: false,
+            }]))
+        }
+        /// Defter boş = emir doldu (ya da kullanıcı iptal etti).
+        fn bos() -> Self {
+            Self(RefCell::new(vec![]))
+        }
+    }
+    impl OrderSource for SahteEmirler {
+        async fn open_orders(
+            &self,
+            _a: &str,
+        ) -> Result<Vec<pusu_feed::OpenOrder>, pusu_feed::FeedError> {
+            Ok(self.0.borrow().clone())
+        }
+    }
+
+    struct PatlayanEmirler;
+    impl OrderSource for PatlayanEmirler {
+        async fn open_orders(
+            &self,
+            _a: &str,
+        ) -> Result<Vec<pusu_feed::OpenOrder>, pusu_feed::FeedError> {
+            Err(pusu_feed::FeedError::Decode("hesap okunamadi".into()))
         }
     }
 
@@ -345,10 +520,13 @@ mod tests {
                 symbol: "BTC-USD".into(),
                 side: Side::Buy,
                 size: 0.01,
+                entry: Entry::Market,
                 exits: None,
             }),
             state: AlertState::Armed,
             armed_at_ms,
+            entry_oid: None,
+            fill_deadline_ms: None,
         }
     }
 
@@ -361,7 +539,7 @@ mod tests {
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![]));
         let borsa = SahteBorsa::new(dolu_yanit());
-        let mut w = Watcher::new(kaynak, SahteMark(90_000.0), borsa);
+        let mut w = Watcher::new(kaynak, SahteMark(90_000.0), SahteEmirler::bos(), borsa);
         let mut alerts = vec![alarm(armed)];
 
         // 11:00 kapanışı henüz olmadı → hiçbir şey.
@@ -386,7 +564,12 @@ mod tests {
         // En pahalı hata: aynı işleme iki kez girmek.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(90_000.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(90_000.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         w.tick(&mut alerts, armed + 2_000).await;
@@ -405,7 +588,12 @@ mod tests {
         // kullanıcı bir SONRAKİ kapanışı bekliyor.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed - 1_800_000, 95_000.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
 
         let mut alerts = vec![alarm(armed)];
         let t = w.tick(&mut alerts, armed + 1_000).await;
@@ -420,7 +608,12 @@ mod tests {
         // Kullanıcı bir saat kaybederdi.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         // İlk tur: henüz kapanış yok.
@@ -442,7 +635,12 @@ mod tests {
         // ardından gecikmiş yanıt 10:00'ı 95k olarak getiriyor.
         let armed = 9_000_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(11_000_000, 89_000.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, 11_100_000).await;
@@ -458,13 +656,218 @@ mod tests {
     #[tokio::test]
     async fn feed_patlarsa_ateslenmez_ama_alarm_olmez() {
         let armed = 10_800_000;
-        let mut w = Watcher::new(PatlayanKline, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            PatlayanKline,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 1_000).await;
         assert!(t.fired.is_empty());
         assert_eq!(t.feed_errors.len(), 1, "hata rapor edilmeli");
         assert_eq!(alerts[0].state, AlertState::Armed, "alarm silahlı kalmalı");
+    }
+
+    // -- limit giriş + dolum deadline ---------------------------------------
+
+    /// Kullanıcının kurgusu: "15m'de 10'un üstünde kapatırsa limit emrimi gir
+    /// (retest'te dolsun); retest gelmez de dolmazsa 15 dk sonra bana sor."
+    fn retest_alarmi(armed: u64) -> Alert {
+        let mut a = alarm(armed);
+        a.condition = Condition::CandleClose {
+            symbol: "BTC-USD".into(),
+            interval: Interval::M15,
+            cross: Cross::Above,
+            price: 10.0,
+        };
+        a.entry_oid = Some("giris-oid".into());
+        if let AlertAction::Trade(s) = &mut a.action {
+            s.entry = Entry::Limit { price: 9.8 };
+        }
+        a
+    }
+
+    fn resting_yanit() -> serde_json::Value {
+        serde_json::json!({"status":"ok","response":{"data":{"statuses":[
+            {"resting":{"oid":"giris-oid"}}
+        ]}}})
+    }
+
+    #[tokio::test]
+    async fn limit_giris_deftere_konunca_working_olur() {
+        // Market emri gibi "bitti" demiyoruz: retest bekleniyor.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        let t = w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Working);
+        assert_eq!(t.working, vec![AlertId::new("a1")]);
+        assert!(t.missed.is_empty(), "daha vakit var");
+    }
+
+    #[tokio::test]
+    async fn deadline_periyottan_geliyor() {
+        // 15m alarm → 15 dakika. Kullanıcının kuralı bu.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        let simdi = armed + 2_000;
+        w.tick(&mut alerts, simdi).await;
+        assert_eq!(
+            alerts[0].fill_deadline_ms,
+            Some(simdi + 900_000),
+            "gönderimden 15 dk sonrası"
+        );
+    }
+
+    #[tokio::test]
+    async fn retest_gelmezse_iptal_edilip_kullaniciya_soruluyor() {
+        // Senaryonun asıl yarısı: hacimli gitti, emir dolmadı.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Working);
+
+        // 15 dakika geçti, emir hâlâ dolmadı.
+        let t = w.tick(&mut alerts, armed + 2_000 + 900_001).await;
+        assert_eq!(alerts[0].state, AlertState::Missed);
+        assert_eq!(t.missed, vec![AlertId::new("a1")]);
+        assert_eq!(
+            w.dispatch.iptal_sayisi(),
+            1,
+            "ön-imzalı iptal gönderilmeliydi"
+        );
+    }
+
+    #[tokio::test]
+    async fn retest_gelirse_islem_girer() {
+        // Emir defterden kayboldu → doldu.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Working);
+
+        *w.orders.0.borrow_mut() = vec![]; // retest geldi, emir doldu
+        let t = w.tick(&mut alerts, armed + 3_000).await;
+        assert_eq!(alerts[0].state, AlertState::Fired);
+        assert!(t.missed.is_empty());
+        assert_eq!(w.dispatch.iptal_sayisi(), 0, "dolan emir iptal edilmemeli");
+    }
+
+    #[tokio::test]
+    async fn kismen_dolan_emir_sure_dolsa_bile_iptal_edilmez() {
+        // Emir "alınmış": pozisyon var, korumaları kurulu. İptal etmek
+        // korumasız bırakmaz ama kullanıcıyı boşuna rahatsız eder.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.004),
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        let t = w.tick(&mut alerts, armed + 2_000 + 900_001).await;
+
+        assert_eq!(alerts[0].state, AlertState::Fired);
+        assert!(t.missed.is_empty());
+        assert_eq!(w.dispatch.iptal_sayisi(), 0);
+    }
+
+    #[tokio::test]
+    async fn emirler_okunamazsa_karar_verilmez() {
+        // Defteri göremiyorsak "dolmadı" sayıp iptal edemeyiz — dolmuş bir
+        // pozisyonu korumasız bırakırdık.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            PatlayanEmirler,
+            SahteBorsa::new(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        let t = w.tick(&mut alerts, armed + 2_000 + 900_001).await;
+
+        assert_eq!(alerts[0].state, AlertState::Working, "izlemeye devam");
+        assert_eq!(w.dispatch.iptal_sayisi(), 0);
+        assert!(!t.feed_errors.is_empty(), "hata rapor edilmeli");
+    }
+
+    #[tokio::test]
+    async fn iptal_gonderilemezse_missed_denmez() {
+        // İptal gitmediyse emir hâlâ canlı. "Kaçırdın" demek yalan olur:
+        // kullanıcı emrin çekildiğini sanır, oysa dolabilir.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::duran("giris-oid", 0.0),
+            SahteBorsa::iptal_patlayan(resting_yanit()),
+        );
+        let mut alerts = vec![retest_alarmi(armed)];
+
+        w.tick(&mut alerts, armed + 2_000).await;
+        let t = w.tick(&mut alerts, armed + 2_000 + 900_001).await;
+
+        assert_eq!(alerts[0].state, AlertState::Working, "hâlâ canlı");
+        assert!(t.missed.is_empty(), "iptal edilemedi ama kaçırıldı denildi");
+        assert!(!t.feed_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn market_giris_working_olmaz() {
+        // Market emri ya dolar ya reddedilir; beklemez.
+        let armed = 10_800_000;
+        let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 90_500.0)]));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
+        let mut alerts = vec![alarm(armed)];
+
+        let t = w.tick(&mut alerts, armed + 2_000).await;
+        assert_eq!(alerts[0].state, AlertState::Fired);
+        assert!(t.working.is_empty());
     }
 
     // -- iptal koşulu -------------------------------------------------------
@@ -492,7 +895,12 @@ mod tests {
         // Fiyat 9'un altına düştü: setup öldü, alarm düşmeli.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 9.5)]));
-        let mut w = Watcher::new(kaynak, SahteMark(8.9), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(8.9),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![setup_alarmi(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -508,7 +916,12 @@ mod tests {
         // kullanıcının iptal koşuluyla korunmak istediği şeyin ta kendisi.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
-        let mut w = Watcher::new(kaynak, SahteMark(8.9), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(8.9),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![setup_alarmi(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -522,7 +935,12 @@ mod tests {
         // Fiyat 9'un üstünde kaldı, mum 10.5'ten kapandı → işlem girmeli.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 10.5)]));
-        let mut w = Watcher::new(kaynak, SahteMark(10.4), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(10.4),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![setup_alarmi(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -574,7 +992,7 @@ mod tests {
         let kapanis = 10 * 3_600_000; // 10:00'da 90.500'den kapandı
         let kaynak = SahteKline(RefCell::new(vec![mum(kapanis, 90_500.0)]));
         let borsa = SahteBorsa::new(dolu_yanit());
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), borsa);
+        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteEmirler::bos(), borsa);
         let mut alerts = vec![alarm(armed)];
 
         // Watcher 16:00'da geri geliyor — kapanışın üstünden 6 saat geçmiş.
@@ -592,7 +1010,12 @@ mod tests {
         let armed = 9 * 3_600_000;
         let kapanis = 10 * 3_600_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(kapanis, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, kapanis + 300_000).await; // 5 dk sonra
@@ -605,7 +1028,12 @@ mod tests {
     async fn kacirilan_alarm_tekrar_denenmez() {
         let armed = 9 * 3_600_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(10 * 3_600_000, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         w.tick(&mut alerts, 16 * 3_600_000).await;
@@ -627,11 +1055,14 @@ mod tests {
             async fn submit(&self, _a: &Alert) -> Result<serde_json::Value, DispatchError> {
                 Err(DispatchError::Network("timeout".into()))
             }
+            async fn cancel(&self, _a: &Alert) -> Result<serde_json::Value, DispatchError> {
+                Err(DispatchError::Network("timeout".into()))
+            }
         }
 
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), Kayip);
+        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteEmirler::bos(), Kayip);
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -653,7 +1084,12 @@ mod tests {
         ]}}});
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(yanit));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(yanit),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -669,7 +1105,12 @@ mod tests {
         // Alarm çalıştı ama işlem girmedi. "Fired" demek yalan olurdu.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 90_500.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(ret_yaniti()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(ret_yaniti()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -681,7 +1122,12 @@ mod tests {
     async fn esik_gecilmezse_ateslenmez() {
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 1_000, 89_900.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 2_000).await;
@@ -699,7 +1145,12 @@ mod tests {
         // tam olarak kaçınmak istediği şey.
         let armed = 10_800_000;
         let kaynak = SahteKline(RefCell::new(vec![mum(armed + 3_600_000, 95_000.0)]));
-        let mut w = Watcher::new(kaynak, SahteMark(0.0), SahteBorsa::new(dolu_yanit()));
+        let mut w = Watcher::new(
+            kaynak,
+            SahteMark(0.0),
+            SahteEmirler::bos(),
+            SahteBorsa::new(dolu_yanit()),
+        );
         let mut alerts = vec![alarm(armed)];
 
         let t = w.tick(&mut alerts, armed + 60_000).await;

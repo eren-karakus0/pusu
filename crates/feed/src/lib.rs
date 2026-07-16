@@ -29,8 +29,10 @@
 
 pub mod kline;
 pub mod mark;
+pub mod orders;
 pub mod source;
 
 pub use kline::{last_closed, Kline};
 pub use mark::{HttpMarkSource, MarkSource};
+pub use orders::{HttpOrderSource, OpenOrder, OrderSource};
 pub use source::{FeedError, HttpKlineSource, KlineSource};

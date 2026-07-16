@@ -52,9 +52,9 @@
 
 use bulk_keychain::{
     Commission, OnFill, Order, OrderItem, OrderType, Pubkey, RangeOco, Stop, TakeProfit,
-    TriggerBasket,
+    TimeInForce, TriggerBasket,
 };
-use pusu_core::{Alert, AlertAction, Condition, Execution, Exits, Side, TradeSpec};
+use pusu_core::{Alert, AlertAction, Condition, Entry, Execution, Exits, Side, TradeSpec};
 
 /// Derlenmiş alarm: imzalanmaya hazır payload + kimin yürüteceği.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,7 +127,16 @@ fn compile_onchain(
         unreachable!("OnChain yalnızca MarkCross'tan gelir");
     };
 
-    let mut actions = vec![market_entry(spec, builder)?];
+    // Zincirde limit giriş yok: `trig` ateşleyip `l`'yi deftere koyar ama
+    // çıkışlar AYNI anda kurulur — yani daha var olmayan bir pozisyonu
+    // korurlar. Üstelik dolum takibi de yapamayız (borsa emri tutuyor, biz
+    // izlemiyoruz), o yüzden "dolmazsa sor" da çalışmaz. Limit giriş
+    // watcher'ın işi.
+    if spec.entry.is_limit() {
+        return Err(CompileError::LimitEntryOnChain);
+    }
+
+    let mut actions = vec![entry_order(spec, builder)?];
     if let Some(e) = &spec.exits {
         // `trig` kademeyi kabul ediyor: staging'de [m, tp, tp, st, st] ile
         // doğrulandı — dördü de reduce-only olarak dinlenmeye geçti.
@@ -149,7 +158,7 @@ fn compile_onchain(
 
 /// ⚡ `[m{builderCode}, of{p:0, actions:[çıkışlar…]}]`
 fn compile_watched(spec: &TradeSpec, builder: &str) -> Result<Compiled, CompileError> {
-    let mut items = vec![market_entry(spec, builder)?];
+    let mut items = vec![entry_order(spec, builder)?];
     if let Some(e) = &spec.exits {
         // Parent = index 0 (market emri). Gerçek bir emir olduğu için `of`
         // burada çalışıyor: market reddedilirse çıkışlar hiç kurulmuyor.
@@ -161,19 +170,31 @@ fn compile_watched(spec: &TradeSpec, builder: &str) -> Result<Compiled, CompileE
     Ok(Compiled::Watched { items })
 }
 
-fn market_entry(spec: &TradeSpec, builder: &str) -> Result<OrderItem, CompileError> {
+/// Giriş emri. Market ya da limit (retest).
+///
+/// Builder fee **yalnızca burada** — çıkışlara (`tp`/`st`/`rng`) hiç
+/// iliştirilmiyor. Koruma emirleri ücretsiz; bkz. PLAN §4.
+fn entry_order(spec: &TradeSpec, builder: &str) -> Result<OrderItem, CompileError> {
     let to = Pubkey::from_base58(builder).map_err(|_| CompileError::BadPubkey(builder.into()))?;
     let commission = Commission::new(to, pusu_core::BUILDER_FEE_BPS)
         .map_err(|_| CompileError::InvalidFee(pusu_core::BUILDER_FEE_BPS))?;
 
+    let (price, order_type) = match spec.entry {
+        Entry::Market => (0.0, OrderType::market()),
+        // GTC: borsada süre sınırlı emir yok (TimeInForce yalnızca Gtc/Ioc/Alo,
+        // GTD yok). Dolmayan emrin süresini watcher yönetiyor — ön-imzalı `cx`
+        // ile. Bkz. §8.9.
+        Entry::Limit { price } => (price, OrderType::limit(TimeInForce::Gtc)),
+    };
+
     Ok(OrderItem::Order(Order {
         symbol: spec.symbol.to_string(),
         is_buy: spec.side.is_buy(),
-        price: 0.0,
+        price,
         size: spec.size,
         reduce_only: false,
         iso: false,
-        order_type: OrderType::market(),
+        order_type,
         client_id: None,
         commission: Some(commission),
     }))
@@ -282,6 +303,7 @@ mod tests {
             symbol: Symbol::new("BTC-USD"),
             side,
             size: 0.01,
+            entry: Entry::Market,
             exits,
         }
     }
@@ -296,6 +318,8 @@ mod tests {
             action,
             state: AlertState::Armed,
             armed_at_ms: 0,
+            entry_oid: None,
+            fill_deadline_ms: None,
         }
     }
 

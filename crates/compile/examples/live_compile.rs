@@ -14,8 +14,8 @@
 use bulk_keychain::{Keypair, Signer};
 use pusu_compile::{compile, Compiled};
 use pusu_core::{
-    Alert, AlertAction, AlertId, AlertState, Condition, Cross, ExitLeg, Exits, Interval, Side,
-    Symbol, TradeSpec,
+    Alert, AlertAction, AlertId, AlertState, Condition, Cross, Entry, ExitLeg, Exits, Interval,
+    Side, Symbol, TradeSpec,
 };
 
 const API: &str = "https://staging-api.bulk.trade/api/v1";
@@ -37,10 +37,13 @@ fn alert(condition: Condition, exits: Option<Exits>) -> Alert {
             symbol: Symbol::new("BTC-USD"),
             side: Side::Buy,
             size: 0.001,
+            entry: Entry::Market,
             exits,
         }),
         state: AlertState::Armed,
         armed_at_ms: 0,
+        entry_oid: None,
+        fill_deadline_ms: None,
     }
 }
 
