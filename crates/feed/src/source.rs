@@ -92,7 +92,7 @@ pub struct HttpKlineSource {
 impl HttpKlineSource {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::http::client(),
             base_url: base_url.into(),
         }
     }

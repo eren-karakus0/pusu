@@ -27,6 +27,7 @@
 //! kaçırması demekti. Koruma `pusu-engine`'e, alarm başına çalışan bir tazelik
 //! kapısına taşındı; burada artık öyle bir durum tutulmuyor.
 
+mod http;
 pub mod kline;
 pub mod mark;
 pub mod orders;
