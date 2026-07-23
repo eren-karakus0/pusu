@@ -96,6 +96,13 @@ impl Store {
         Self { pool }
     }
 
+    /// DB canlı mı? Health-check için hafif `SELECT 1` — statik "ok" yalan
+    /// söylemesin (Postgres düşükken sağlıklı görünmek en tehlikeli hata).
+    pub async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Kullanıcıyı kaydet (idempotent).
     pub async fn upsert_user(&self, pubkey: &str) -> Result<(), StoreError> {
         sqlx::query("INSERT INTO users (pubkey) VALUES ($1) ON CONFLICT (pubkey) DO NOTHING")
@@ -390,6 +397,202 @@ impl Store {
             .await?;
         Ok(row.get::<i64, _>("n"))
     }
+
+    /// Bir Notify olayını bildirim outbox'ına yaz. `(alert_id, kind)` tekil
+    /// olduğu için idempotent: watcher aynı turu çökme sonrası tekrar işlese de
+    /// çift bildirim olmaz. Yeni satır girdiyse `true`.
+    pub async fn record_notification(
+        &self,
+        owner: &str,
+        alert_id: &AlertId,
+        kind: &str,
+        body: &serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        let n = sqlx::query(
+            "INSERT INTO notifications (owner, alert_id, kind, body) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (alert_id, kind) DO NOTHING",
+        )
+        .bind(owner)
+        .bind(alert_id.as_str())
+        .bind(kind)
+        .bind(body)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Kullanıcının bildirimleri, en yeni önce (en çok `limit` satır).
+    ///
+    /// JSON döndürüyor (domain tipi yok): `{id, alert_id, kind, body,
+    /// created_at_ms, read}`. `created_at` istemci için epoch-ms'e çevriliyor.
+    pub async fn list_notifications(
+        &self,
+        owner: &str,
+        limit: i64,
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, alert_id, kind, body, \
+                    (EXTRACT(EPOCH FROM created_at) * 1000)::BIGINT AS created_at_ms, \
+                    read_at IS NOT NULL AS read \
+             FROM notifications WHERE owner = $1 \
+             ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(owner)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.get::<i64, _>("id"),
+                    "alert_id": r.get::<String, _>("alert_id"),
+                    "kind": r.get::<String, _>("kind"),
+                    "body": r.get::<serde_json::Value, _>("body"),
+                    "created_at_ms": r.get::<i64, _>("created_at_ms"),
+                    "read": r.get::<bool, _>("read"),
+                })
+            })
+            .collect())
+    }
+
+    /// Kullanıcının okunmamış bildirimlerini okundu işaretle. İşaretlenen sayı.
+    pub async fn mark_notifications_read(&self, owner: &str) -> Result<u64, StoreError> {
+        let n = sqlx::query(
+            "UPDATE notifications SET read_at = now() \
+             WHERE owner = $1 AND read_at IS NULL",
+        )
+        .bind(owner)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n)
+    }
+
+    /// Kullanıcının okunmamış bildirim sayısı — rozet için hafif sorgu.
+    pub async fn unread_count(&self, owner: &str) -> Result<i64, StoreError> {
+        let row = sqlx::query(
+            "SELECT count(*) AS n FROM notifications WHERE owner = $1 AND read_at IS NULL",
+        )
+        .bind(owner)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.get::<i64, _>("n"))
+    }
+
+    /// Kullanıcının iletişim kanallarını ayarla (e-posta / telegram chat id).
+    ///
+    /// Kısmi güncelleme: `None` verilen alan **değişmez** (`COALESCE`), böylece
+    /// yalnız e-postayı güncellemek telegram'ı silmez. Kullanıcı yoksa oluşturur.
+    pub async fn set_contact(
+        &self,
+        owner: &str,
+        email: Option<&str>,
+        telegram: Option<&str>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO users (pubkey, email, telegram_chat_id) VALUES ($1, $2, $3) \
+             ON CONFLICT (pubkey) DO UPDATE SET \
+                email = COALESCE(EXCLUDED.email, users.email), \
+                telegram_chat_id = COALESCE(EXCLUDED.telegram_chat_id, users.telegram_chat_id)",
+        )
+        .bind(owner)
+        .bind(email)
+        .bind(telegram)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Kullanıcının iletişim kanalları: `(email, telegram_chat_id)`.
+    pub async fn get_contact(
+        &self,
+        owner: &str,
+    ) -> Result<(Option<String>, Option<String>), StoreError> {
+        let row = sqlx::query("SELECT email, telegram_chat_id FROM users WHERE pubkey = $1")
+            .bind(owner)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some(r) => (
+                r.get::<Option<String>, _>("email"),
+                r.get::<Option<String>, _>("telegram_chat_id"),
+            ),
+            None => (None, None),
+        })
+    }
+
+    /// Belirli bir kanaldan henüz teslim edilmemiş bildirimler (sahibinin o kanalı
+    /// dolu). `dest` = e-posta ya da telegram chat id. En eski önce.
+    async fn undelivered(
+        &self,
+        contact_col: &str,
+        sent_col: &str,
+        limit: i64,
+    ) -> Result<Vec<PendingDelivery>, StoreError> {
+        // contact_col/sent_col sabit iç değerler (kullanıcı girdisi değil) →
+        // SQL enjeksiyonu yok; sqlx bind kolon adına izin vermediği için format.
+        let sql = format!(
+            "SELECT n.id AS id, u.{contact_col} AS dest, n.body AS body \
+             FROM notifications n JOIN users u ON n.owner = u.pubkey \
+             WHERE n.{sent_col} IS NULL AND u.{contact_col} IS NOT NULL \
+             ORDER BY n.created_at ASC LIMIT $1"
+        );
+        let rows = sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?;
+        Ok(rows
+            .iter()
+            .map(|r| PendingDelivery {
+                id: r.get::<i64, _>("id"),
+                dest: r.get::<String, _>("dest"),
+                body: r.get::<serde_json::Value, _>("body"),
+            })
+            .collect())
+    }
+
+    /// E-posta ile teslim bekleyen bildirimler.
+    pub async fn undelivered_email(&self, limit: i64) -> Result<Vec<PendingDelivery>, StoreError> {
+        self.undelivered("email", "email_sent_at", limit).await
+    }
+
+    /// Telegram ile teslim bekleyen bildirimler.
+    pub async fn undelivered_telegram(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<PendingDelivery>, StoreError> {
+        self.undelivered("telegram_chat_id", "telegram_sent_at", limit)
+            .await
+    }
+
+    /// Bir bildirimi e-posta teslim edildi işaretle.
+    pub async fn mark_email_sent(&self, id: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE notifications SET email_sent_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Bir bildirimi telegram teslim edildi işaretle.
+    pub async fn mark_telegram_sent(&self, id: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE notifications SET telegram_sent_at = now() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
+/// Teslim bekleyen tek bir bildirim: kime (`dest`) ve ne (`body`).
+#[derive(Debug, Clone)]
+pub struct PendingDelivery {
+    pub id: i64,
+    /// Hedef adres — e-posta ya da telegram chat id.
+    pub dest: String,
+    /// Bildirim gövdesi (`{symbol, message}`).
+    pub body: serde_json::Value,
 }
 
 /// u64 (unix ms) → i64. Postgres BIGINT işaretli; 2262 yılına kadar taşma yok.
