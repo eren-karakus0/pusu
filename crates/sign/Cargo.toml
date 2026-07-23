@@ -13,3 +13,6 @@ pusu-compile = { path = "../compile" }
 bulk-keychain.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
+# offchain imza zarfı (Phantom guardrail'ını aşan mod) — Signable-Hash + pubkey.
+sha2 = "0.10"
+bs58.workspace = true

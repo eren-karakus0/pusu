@@ -29,6 +29,8 @@
 //! (`signer`). Bu ayrım §7'nin izolasyonunu taşıyor: master imzalar ama zarar
 //! tavanı sub'a ayrılan miktarla sınırlı.
 
+pub mod offchain;
+
 use bulk_keychain::{
     finalize_transaction, prepare_approve_builder_code, prepare_create_sub_account, prepare_group,
     prepare_revoke_builder_code, Cancel, CreateSubAccount, Hash, OrderItem, PreparedMessage,
