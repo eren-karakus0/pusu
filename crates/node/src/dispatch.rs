@@ -32,7 +32,13 @@ impl HttpDispatch {
     pub fn new(store: Store, base_url: impl Into<String>) -> Self {
         Self {
             store,
-            client: reqwest::Client::new(),
+            // Timeout'lu: asılı bir /order bağlantısı watcher'ı dondurmasın.
+            // Zaman aşan gönderim Uncertain'a düşer, reconcile toparlar.
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.into(),
         }
     }

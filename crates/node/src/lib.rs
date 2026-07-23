@@ -15,6 +15,8 @@
 //! birleştiren çalışan düğüm.
 
 mod dispatch;
+mod health;
+mod notify;
 mod reconcile;
 mod runner;
 

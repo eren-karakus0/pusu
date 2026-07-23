@@ -19,6 +19,13 @@ thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+# health/ready/metrics HTTP sunucusu ("watcher'ı kim izliyor").
+axum.workspace = true
 
 [dev-dependencies]
 sqlx = { workspace = true }
+# live_execute örneği için: raw imza (cüzdan yok) ile tam zincir kanıtı.
+pusu-sign = { path = "../sign" }
+solana-keypair.workspace = true
+solana-signer.workspace = true
+bs58.workspace = true

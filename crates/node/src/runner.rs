@@ -35,6 +35,7 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 
 use crate::dispatch::HttpDispatch;
+use crate::health::Health;
 use crate::reconcile::{reconcile, ReconcileError};
 
 /// Düğümün çalışması için gereken her şey.
@@ -118,6 +119,45 @@ pub async fn run(cfg: Config) -> Result<(), NodeError> {
         "watcher döngüsü başlıyor"
     );
 
+    // "Watcher'ı kim izliyor" — health/ready/metrics sunucusu. `/ready`,
+    // supervisor'a donmuş bir döngüyü 503 ile bildirir.
+    let health = Health::new(cfg.poll_interval.as_millis() as u64);
+    let addr = std::env::var("PUSU_METRICS_ADDR").unwrap_or_else(|_| "0.0.0.0:9100".into());
+    match addr.parse() {
+        Ok(sock) => {
+            let h = health.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::health::serve(h, sock).await {
+                    error!("health sunucusu düştü: {e}");
+                }
+            });
+            info!(addr, "health/ready/metrics sunucusu açık");
+        }
+        Err(e) => warn!("PUSU_METRICS_ADDR geçersiz ({addr}): {e} — health sunucusu atlandı"),
+    }
+
+    // Ek bildirim kanalları (e-posta/telegram). In-app her zaman açık; bunlar
+    // yalnızca ortam değişkeni varsa. Watcher döngüsünden AYRI bir task —
+    // yavaş bir SMTP/HTTP çağrısı alarm değerlendirmesini geciktirmesin.
+    let notify_cfg = crate::notify::NotifyConfig::from_env();
+    if notify_cfg.any_enabled() {
+        let store = store.clone();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap_or_default();
+        tokio::spawn(async move {
+            let mut t = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                t.tick().await;
+                crate::notify::deliver_pending(&store, &notify_cfg, &client).await;
+            }
+        });
+        info!("bildirim teslim döngüsü açık (email/telegram)");
+    } else {
+        info!("ek bildirim kanalı yok (PUSU_RESEND_API_KEY / PUSU_TELEGRAM_BOT_TOKEN) — yalnız in-app");
+    }
+
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -125,8 +165,9 @@ pub async fn run(cfg: Config) -> Result<(), NodeError> {
                 return Ok(());
             }
             _ = ticker.tick() => {
-                match tur(&store, &mut watcher, now_ms()).await {
-                    Ok(t) => ozetle(&t),
+                let now = now_ms();
+                match tur(&store, &mut watcher, now).await {
+                    Ok(t) => { health.record(now, &t); ozetle(&t); }
                     // Tek turun DB hatası ölümcül değil; bir sonraki tur yeniden dener.
                     Err(e) => error!("tur atlandı: {e}"),
                 }
@@ -151,7 +192,37 @@ pub async fn tur<K: KlineSource, M: MarkSource, O: OrderSource, D: Dispatch>(
     let tick = watcher.tick(&mut alerts, now_ms).await;
 
     persist(store, &alerts, &onceki).await;
+    record_notifications(store, &alerts, &tick).await;
     Ok(tick)
+}
+
+/// Notify koşulu tutan alarmları uygulama-içi bildirim outbox'ına yaz.
+///
+/// `persist`'ten sonra: state önce yazılsın. Kayıt `(alert_id, kind)` üzerinde
+/// idempotent olduğu için sıra/çökme çift bildirim üretmez. Body in-app render
+/// için `{symbol, message}` — mesaj [`pusu_core::Condition::summary`]'den.
+async fn record_notifications(store: &Store, alerts: &[Alert], tick: &Tick) {
+    for id in &tick.notified {
+        let Some(a) = alerts.iter().find(|a| a.id == *id) else {
+            continue; // alarm listede yoksa (olmamalı) sessiz geç
+        };
+        let symbol = a
+            .condition
+            .symbols()
+            .first()
+            .map(|s| s.as_str())
+            .unwrap_or_default();
+        let body = serde_json::json!({
+            "symbol": symbol,
+            "message": a.condition.summary(),
+        });
+        if let Err(e) = store
+            .record_notification(&a.owner, id, "fired", &body)
+            .await
+        {
+            warn!(id = id.as_str(), "bildirim yazılamadı: {e}");
+        }
+    }
 }
 
 /// Bir alarmın watcher'ın dokunabileceği tek alanları.
