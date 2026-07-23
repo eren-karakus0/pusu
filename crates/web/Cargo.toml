@@ -13,13 +13,27 @@ repository.workspace = true
 [dependencies]
 pusu-core = { path = "../core" }
 pusu-sign = { path = "../sign" }
+pusu-nl = { path = "../nl" }
 
 leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Location",
+    "Document",
+    "Element",
+    "HtmlDivElement",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+    "CanvasGradient",
+    "TextMetrics",
+    "DomRect",
+] }
 gloo-net = "0.6"
+# Canlı grafik: mum/mark polling'i için zamanlayıcı.
+gloo-timers = { version = "0.3", features = ["futures"] }
 bs58 = "0.5"
 serde_json.workspace = true
 console_error_panic_hook = "0.1"

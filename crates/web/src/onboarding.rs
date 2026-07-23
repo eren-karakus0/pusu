@@ -22,7 +22,7 @@ impl std::fmt::Display for FlowError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Wallet(m) => write!(f, "{m}"),
-            Self::Sign(m) => write!(f, "imza hazırlanamadı: {m}"),
+            Self::Sign(m) => write!(f, "couldn't prepare signature: {m}"),
             Self::Bulk(m) => write!(f, "{m}"),
             Self::Shape(m) => write!(f, "{m}"),
         }
@@ -49,7 +49,7 @@ pub async fn create_subaccount(master: &str, name: &str, margin: f64) -> Result<
         .await
         .map_err(|e| FlowError::Bulk(e.to_string()))?;
     extract_sub(&resp)
-        .ok_or_else(|| FlowError::Shape("sub-account pubkey yanıtta bulunamadı".into()))
+        .ok_or_else(|| FlowError::Shape("sub-account pubkey not found in response".into()))
 }
 
 /// Builder onayı (`abc`, fee=2). Onayladığın = kestiğimiz.

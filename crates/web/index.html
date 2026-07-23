@@ -1,11 +1,134 @@
 <!DOCTYPE html>
-<html lang="tr">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PUSU</title>
     <link data-trunk rel="rust" />
     <link data-trunk rel="css" href="style.css" />
+
+    <!-- Tam-özellikli grafik motoru: KLineChart (açık kaynak, Apache-2.0) —
+         built-in indikatörler + çizim araçları. -->
+    <script src="https://unpkg.com/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
+    <script>
+      // Rust (wasm) buradan çağırıyor. Handle opak; Rust yalnız taşır.
+      // Tema PUSU paletiyle (near-black + canlı yeşil/kırmızı + gold).
+      const PUSU_STYLES = {
+        grid: {
+          horizontal: { color: "rgba(255,255,255,0.05)" },
+          vertical: { color: "rgba(255,255,255,0.03)" },
+        },
+        candle: {
+          priceMark: {
+            last: {
+              upColor: "#29c281",
+              downColor: "#ff5667",
+              line: { color: "#8b7d63" },
+              text: { color: "#0e0a06" },
+            },
+            high: { color: "#cabca0" },
+            low: { color: "#cabca0" },
+          },
+          tooltip: {
+            text: { color: "#cabca0" },
+          },
+          bar: {
+            upColor: "#29c281",
+            downColor: "#ff5667",
+            noChangeColor: "#8b7d63",
+            upBorderColor: "#29c281",
+            downBorderColor: "#ff5667",
+            upWickColor: "#29c281",
+            downWickColor: "#ff5667",
+          },
+        },
+        xAxis: {
+          axisLine: { color: "#2c2114" },
+          tickLine: { color: "#2c2114" },
+          tickText: { color: "#8b7d63" },
+        },
+        yAxis: {
+          axisLine: { color: "#2c2114" },
+          tickLine: { color: "#2c2114" },
+          tickText: { color: "#8b7d63" },
+        },
+        crosshair: {
+          horizontal: {
+            line: { color: "rgba(240,200,109,0.4)" },
+            text: { backgroundColor: "#d3ac54", color: "#0e0a06" },
+          },
+          vertical: {
+            line: { color: "rgba(240,200,109,0.4)" },
+            text: { backgroundColor: "#d3ac54", color: "#0e0a06" },
+          },
+        },
+        indicator: {
+          lastValueMark: { show: false },
+        },
+      };
+      const MAIN_PANE = ["MA", "EMA", "BOLL", "SAR"];
+
+      window.pusuChart = {
+        init(el) {
+          if (!window.klinecharts || !el) return null;
+          const chart = klinecharts.init(el);
+          if (!chart) return null;
+          chart.setStyles(PUSU_STYLES);
+          const ro = new ResizeObserver(() => chart.resize());
+          ro.observe(el);
+          return { chart, line: null, th: 0, inds: {}, ro };
+        },
+        setData(h, json) {
+          if (!h) return;
+          let ks;
+          try { ks = JSON.parse(json); } catch (e) { return; }
+          ks.sort((a, b) => a.t - b.t);
+          const seen = new Set();
+          const data = [];
+          for (const k of ks) {
+            if (seen.has(k.t)) continue;
+            seen.add(k.t);
+            data.push({ timestamp: k.t, open: k.o, high: k.h, low: k.l, close: k.c, volume: k.v });
+          }
+          h.chart.applyNewData(data);
+        },
+        setThreshold(h, price) {
+          if (!h) return;
+          h.th = price;
+          if (h.line) { h.chart.removeOverlay(h.line); h.line = null; }
+          if (price > 0) {
+            h.line = h.chart.createOverlay({
+              name: "horizontalStraightLine",
+              lock: true,
+              points: [{ value: price }],
+              styles: { line: { color: "#f0c86d", style: "dashed", size: 1 } },
+            });
+          }
+        },
+        toggleIndicator(h, name) {
+          if (!h) return;
+          if (h.inds[name]) {
+            h.chart.removeIndicator(h.inds[name], name);
+            delete h.inds[name];
+          } else {
+            const opts = MAIN_PANE.indexOf(name) >= 0 ? { id: "candle_pane" } : undefined;
+            h.inds[name] = h.chart.createIndicator(name, false, opts);
+          }
+        },
+        hasIndicator(h, name) {
+          return !!(h && h.inds[name]);
+        },
+        draw(h, name) {
+          if (h) h.chart.createOverlay(name);
+        },
+        clearDraw(h) {
+          if (!h) return;
+          h.chart.removeOverlay();
+          h.line = null;
+          if (h.th > 0) this.setThreshold(h, h.th);
+        },
+      };
+    </script>
   </head>
   <body></body>
 </html>

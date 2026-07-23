@@ -25,9 +25,9 @@ pub enum WalletError {
 impl std::fmt::Display for WalletError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoWallet => f.write_str("cüzdan bulunamadı (Phantom kurulu mu?)"),
-            Self::Rejected(m) => write!(f, "cüzdan reddetti: {m}"),
-            Self::Shape(m) => write!(f, "beklenmeyen cüzdan yanıtı: {m}"),
+            Self::NoWallet => f.write_str("wallet not found (is Phantom installed?)"),
+            Self::Rejected(m) => write!(f, "wallet rejected: {m}"),
+            Self::Shape(m) => write!(f, "unexpected wallet response: {m}"),
         }
     }
 }
@@ -36,7 +36,7 @@ fn js_err(e: JsValue) -> WalletError {
     WalletError::Rejected(
         e.as_string()
             .or_else(|| js_sys::Error::from(e).message().as_string())
-            .unwrap_or_else(|| "bilinmeyen hata".into()),
+            .unwrap_or_else(|| "unknown error".into()),
     )
 }
 
@@ -58,9 +58,9 @@ async fn call_method(
     arg: Option<&JsValue>,
 ) -> Result<JsValue, WalletError> {
     let f = Reflect::get(target, &JsValue::from_str(method))
-        .map_err(|_| WalletError::Shape(format!("{method} yok")))?
+        .map_err(|_| WalletError::Shape(format!("no {method}")))?
         .dyn_into::<Function>()
-        .map_err(|_| WalletError::Shape(format!("{method} fonksiyon değil")))?;
+        .map_err(|_| WalletError::Shape(format!("{method} is not a function")))?;
     let ret = match arg {
         Some(a) => f.call1(target, a),
         None => f.call0(target),
@@ -68,7 +68,7 @@ async fn call_method(
     .map_err(js_err)?;
     let promise = ret
         .dyn_into::<Promise>()
-        .map_err(|_| WalletError::Shape(format!("{method} promise döndürmedi")))?;
+        .map_err(|_| WalletError::Shape(format!("{method} did not return a promise")))?;
     JsFuture::from(promise).await.map_err(js_err)
 }
 
@@ -81,7 +81,7 @@ pub async fn connect() -> Result<String, WalletError> {
         .ok()
         .filter(|v| !v.is_undefined() && !v.is_null())
         .or_else(|| Reflect::get(&p, &JsValue::from_str("publicKey")).ok())
-        .ok_or_else(|| WalletError::Shape("publicKey yok".into()))?;
+        .ok_or_else(|| WalletError::Shape("no publicKey".into()))?;
     pubkey_to_base58(&pk)
 }
 
@@ -92,7 +92,7 @@ pub async fn sign_message(message: &[u8]) -> Result<String, WalletError> {
     let arr = Uint8Array::from(message);
     let res = call_method(&p, "signMessage", Some(&arr)).await?;
     let sig = Reflect::get(&res, &JsValue::from_str("signature"))
-        .map_err(|_| WalletError::Shape("signature yok".into()))?;
+        .map_err(|_| WalletError::Shape("no signature".into()))?;
     let bytes = Uint8Array::new(&sig).to_vec();
     Ok(bs58::encode(bytes).into_string())
 }
@@ -105,10 +105,10 @@ fn pubkey_to_base58(pk: &JsValue) -> Result<String, WalletError> {
     let to_string = Reflect::get(pk, &JsValue::from_str("toString"))
         .ok()
         .and_then(|f| f.dyn_into::<Function>().ok())
-        .ok_or_else(|| WalletError::Shape("publicKey.toString yok".into()))?;
+        .ok_or_else(|| WalletError::Shape("no publicKey.toString".into()))?;
     to_string
         .call0(pk)
         .map_err(js_err)?
         .as_string()
-        .ok_or_else(|| WalletError::Shape("publicKey string değil".into()))
+        .ok_or_else(|| WalletError::Shape("publicKey is not a string".into()))
 }

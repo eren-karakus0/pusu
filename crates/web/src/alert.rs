@@ -79,10 +79,10 @@ fn build_exits(
         xs.iter()
             .map(|&(price, pct)| {
                 if price <= 0.0 {
-                    return Err("Çıkış fiyatı geçersiz.".to_string());
+                    return Err("Invalid exit price.".to_string());
                 }
                 if pct <= 0.0 || pct > 100.0 {
-                    return Err("Çıkış yüzdesi 0 ile 100 arasında olmalı.".to_string());
+                    return Err("Exit percentage must be between 0 and 100.".to_string());
                 }
                 Ok(ExitLeg::new(price, pct))
             })
@@ -94,10 +94,10 @@ fn build_exits(
         stops: legs(sls)?,
     };
     if !e.pcts_ok() {
-        return Err("Kademe yüzdelerinin toplamı %100'ü aşamaz.".into());
+        return Err("Tier percentages can't add up past 100%.".into());
     }
     if !e.is_coherent(side) {
-        return Err("Stop ile hedef işlemin yanlış tarafında.".into());
+        return Err("Stop and target are on the wrong side of the trade.".into());
     }
     Ok(Some(e))
 }
@@ -105,13 +105,13 @@ fn build_exits(
 /// Formu doğrulayıp `Alert`'e çevir.
 pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String> {
     if f.symbol.trim().is_empty() {
-        return Err("Sembol boş olamaz.".into());
+        return Err("Symbol can't be empty.".into());
     }
     if f.size <= 0.0 {
-        return Err("Miktar 0'dan büyük olmalı.".into());
+        return Err("Size must be greater than 0.".into());
     }
     if f.price <= 0.0 {
-        return Err("Eşik fiyatı geçersiz.".into());
+        return Err("Invalid trigger price.".into());
     }
 
     let symbol = Symbol::new(f.symbol.trim());
@@ -133,7 +133,7 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
 
     let entry = if f.limit_entry {
         if f.limit_price <= 0.0 {
-            return Err("Limit fiyatı geçersiz.".into());
+            return Err("Invalid limit price.".into());
         }
         Entry::Limit {
             price: f.limit_price,
@@ -148,7 +148,7 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
     // "setup öldü" olayı bir sonraki mum kapanışını bekleyemez, o anda geçerli.
     let invalidate = if f.inv_on {
         if f.inv_price <= 0.0 {
-            return Err("İptal fiyatı geçersiz.".into());
+            return Err("Invalid cancel price.".into());
         }
         // Karşı yönlü koruyucu iptal, tetik eşiğinin yanlış tarafındaysa alarm
         // koşul tutmadan anında iptal olur; kullanıcı sessizce kaybeder.
@@ -160,7 +160,7 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
         };
         if opposite && wrong_side {
             return Err(
-                "İptal seviyesi tetik eşiğinin yanlış tarafında — alarm anında iptal olurdu."
+                "The cancel level is on the wrong side of the trigger — the alert would cancel instantly."
                     .into(),
             );
         }
@@ -199,6 +199,20 @@ pub fn build_alert(f: &Form, owner: &str, account: &str) -> Result<Alert, String
     })
 }
 
+/// Doğal dil taslağından tam `Alert` kur — id ve kuruluş anı burada atanır.
+///
+/// Taslak zaten `pusu_nl` tarafından doğrulandı (çıkış tutarlılığı, iptal
+/// tarafı); form yolundaki `build_alert` ile aynı runtime alanlarını koyuyoruz,
+/// yalnızca girdisi cümle.
+pub fn from_draft(draft: pusu_nl::Draft, owner: &str, account: &str) -> Alert {
+    draft.into_alert(pusu_nl::AlertCtx {
+        id: gen_id(),
+        owner: owner.to_string(),
+        account: account.to_string(),
+        now_ms: now_ms(),
+    })
+}
+
 /// Alarmı imzala ve yerine yönlendir.
 pub async fn submit(alert: Alert, master: &str, sub: &str) -> Result<Placed, String> {
     let bundle =
@@ -227,7 +241,7 @@ pub async fn submit(alert: Alert, master: &str, sub: &str) -> Result<Placed, Str
     match routing {
         // Borsaya hemen: kullanıcı imzaladı, biz sadece iletiyoruz.
         Routing::OnChain => {
-            let body = signed.entry.ok_or("giriş blob'u yok")?;
+            let body = signed.entry.ok_or("no entry blob")?;
             bulk::submit(&body).await.map_err(|e| e.to_string())?;
             Ok(Placed::OnChain)
         }

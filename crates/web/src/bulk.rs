@@ -23,9 +23,9 @@ pub enum BulkError {
 impl std::fmt::Display for BulkError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Network(m) => write!(f, "ağ hatası: {m}"),
-            Self::Rejected(m) => write!(f, "borsa reddetti: {m}"),
-            Self::Shape(m) => write!(f, "beklenmeyen yanıt: {m}"),
+            Self::Network(m) => write!(f, "network error: {m}"),
+            Self::Rejected(m) => write!(f, "exchange rejected: {m}"),
+            Self::Shape(m) => write!(f, "unexpected response: {m}"),
         }
     }
 }
