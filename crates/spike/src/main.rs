@@ -61,6 +61,11 @@ enum Command {
     TrigLadder,
     /// S13: aynı imzalı blob iki kez gönderilirse ne oluyor? (storage buna bağlı)
     NonceReplay,
+    /// S14: server hangi imza modunu kabul ediyor? raw|base58|base64 — Phantom
+    /// guardrail'ının çözümü buna bağlı (ham baytları cüzdan imzalayamıyor).
+    SignModes,
+    /// S15: x-bulk-sig-mode header'ı staging'de gerçekten uygulanıyor mu?
+    SignDiag,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -680,7 +685,250 @@ async fn main() -> eyre::Result<()> {
         Command::ExitLadder => cmd_exit_ladder(&cli.api_url).await,
         Command::TrigLadder => cmd_trig_ladder(&cli.api_url).await,
         Command::NonceReplay => cmd_nonce_replay(&cli.api_url).await,
+        Command::SignModes => cmd_sign_modes(&cli.api_url).await,
+        Command::SignDiag => cmd_sign_diag(&cli.api_url).await,
     }
+}
+
+/// S15 — `x-bulk-sig-mode` header'ı staging'de GERÇEKTEN uygulanıyor mu?
+///
+/// S14'te raw ✅, base58/base64 ❌ çıktı. İki açıklama var: (a) header yok
+/// sayılıyor, server hep raw doğruluyor; (b) base58 modu farklı çalışıyor
+/// (mesajı body'de ayrı alanda bekliyor vб.). Ayırıcı testler:
+///   T1: raw içerik, header YOK            → temel (kabul beklenir)
+///   T2: raw içerik, header 'base58'       → KABUL ⇒ header yok sayılıyor
+///   T3: base58 içerik, header 'base58', body'de message=base58(bytes)
+///   T4: base58 içerik, header 'base58', body'de msg=base58(bytes)
+async fn cmd_sign_diag(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        prepare_group, CancelAll, Keypair as KcKeypair, Order, OrderItem, OrderType,
+        PreparedMessage, Signer as KcSigner, TimeInForce,
+    };
+    use solana_signer::Signer as _;
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    let kc = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let acct = kc.pubkey();
+    let sk = solana_keypair::Keypair::from_base58_string(&keys.master);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let limit_px = (px * 0.80 * 100.0).round() / 100.0;
+    println!("BTC mark: {px} | hesap: {}", acct.to_base58());
+
+    let make = |nonce: u64| -> eyre::Result<PreparedMessage> {
+        let order = OrderItem::Order(Order {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            price: limit_px,
+            size: 0.001,
+            reduce_only: false,
+            iso: false,
+            order_type: OrderType::Limit {
+                tif: TimeInForce::Gtc,
+            },
+            client_id: None,
+            commission: None,
+        });
+        prepare_group(vec![order], &acct, Some(&acct), Some(nonce))
+            .map_err(|e| eyre::eyre!("prepare: {e:?}"))
+    };
+
+    // (etiket, header?, imzalanacak-içerik "raw"|"base58", body'ye eklenecek ekstra alanlar)
+    let cases: [(&str, Option<&str>, &str, &[(&str, bool)]); 4] = [
+        ("T1 raw içerik / header YOK", None, "raw", &[]),
+        ("T2 raw içerik / header base58", Some("base58"), "raw", &[]),
+        (
+            "T3 base58 içerik / header base58 / body.message=base58",
+            Some("base58"),
+            "base58",
+            &[("message", true)],
+        ),
+        (
+            "T4 base58 içerik / header base58 / body.msg=base58",
+            Some("base58"),
+            "base58",
+            &[("msg", true)],
+        ),
+    ];
+
+    for (i, (label, header, content_kind, extra)) in cases.iter().enumerate() {
+        let nonce = now_ms + i as u64;
+        let p = make(nonce)?;
+        let content: Vec<u8> = match *content_kind {
+            "raw" => p.message_bytes.clone(),
+            "base58" => p.message_base58().into_bytes(),
+            _ => unreachable!(),
+        };
+        let signature = sk.sign_message(&content).to_string();
+        let mut body = serde_json::json!({
+            "actions": p.actions, "nonce": p.nonce,
+            "account": p.account, "signer": p.signer, "signature": signature,
+        });
+        for (field, _) in extra.iter() {
+            body[*field] = serde_json::Value::String(p.message_base58());
+        }
+        let mut req = reqwest::Client::new().post(format!("{api_url}/order"));
+        if let Some(h) = header {
+            req = req.header("x-bulk-sig-mode", *h);
+        }
+        let resp = req.json(&body).send().await?;
+        let st = resp.status();
+        let txt = resp.text().await?;
+        let bad = txt.to_lowercase().contains("bad signature");
+        let kisa: String = txt.chars().take(200).collect();
+        println!("\n=== {label} ===");
+        println!("HTTP {st} | {kisa}");
+        println!(
+            ">>> {}",
+            if bad {
+                "❌ bad signature"
+            } else {
+                "✅ imza KABUL"
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    println!("\n=== yorum ===");
+    println!("T2 ✅ ise: header YOK SAYILIYOR (staging hep raw doğruluyor).");
+    println!("T2 ❌ ama T3/T4 ✅ ise: base58 modu mesajı body'de bekliyor.");
+    println!("Hepsi (T2,T3,T4) ❌ ise: base58 modu staging'de yok / farklı.");
+
+    println!("\n=== temizlik (cxa) ===");
+    let mut signer = KcSigner::new(kc);
+    let _ = gonder_items(
+        api_url,
+        &mut signer,
+        vec![OrderItem::CancelAll(CancelAll::all())],
+    )
+    .await?;
+    Ok(())
+}
+
+/// S14 — Server hangi imza modunu kabul ediyor?
+///
+/// Canlı testte Phantom, BULK'un ham `message_bytes`'ını `signMessage` ile
+/// imzalamayı reddetti: "You cannot sign solana transactions using sign
+/// message" (baytlar transaction-şekilli → anti-phishing guardrail). BULK docs
+/// `x-bulk-sig-mode` header'ıyla üç mod sunuyor: `raw | offchain | base58`.
+/// `base58`/`base64` modu ham baytların METİN kodlamasını imzalatıyor — ASCII
+/// string transaction'a benzemediği için guardrail'ı geçer ve kanonik olduğu
+/// için server deterministik doğrular (offchain zarfındaki action-line belirsizliği yok).
+///
+/// Bu probe cüzdanı TAKLİT ediyor: `bulk-keychain`'in `KcSigner`'ı ham baytları
+/// imzalıyor (hep çalışan raw yol); burada bunun yerine cüzdanın imzalayacağı
+/// baytları (message_bytes / base58 / base64) ham ed25519 anahtarıyla imzalayıp
+/// ilgili header'la POST ediyoruz. Sunucunun cevabında "bad signature" varsa
+/// imza TUTMADI; resting/filled/rejectedInvalid gibi her şey imzanın TUTTUĞU
+/// anlamına gelir (emrin başka sebeple reddi imzayı ilgilendirmez).
+///
+/// Cüzdan yok — saf backend ölçümü. Sonuç: hangi mod tutuyorsa `pusu-sign` +
+/// `wallet.rs` onu kullanacak.
+async fn cmd_sign_modes(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        prepare_group, CancelAll, Keypair as KcKeypair, Order, OrderItem, OrderType,
+        PreparedMessage, Signer as KcSigner, TimeInForce,
+    };
+    use solana_signer::Signer as _;
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+
+    // Aynı secret'ten iki görünüm: kc → prepare (bulk_keychain::Pubkey),
+    // sk → ham bayt imzalama (cüzdanın yaptığı iş).
+    let kc = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let acct = kc.pubkey();
+    let sk = solana_keypair::Keypair::from_base58_string(&keys.master);
+    println!(
+        "BTC mark: {px} | hesap: {} | signer(solana): {}",
+        acct.to_base58(),
+        sk.pubkey()
+    );
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    // Dolmayacak alış limiti (mark'ın %20 altı) — book'ta bekler, imza doğrulaması kesin çalışır.
+    let limit_px = (px * 0.80 * 100.0).round() / 100.0;
+
+    let make = |nonce: u64| -> eyre::Result<PreparedMessage> {
+        let order = OrderItem::Order(Order {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            price: limit_px,
+            size: 0.001,
+            reduce_only: false,
+            iso: false,
+            order_type: OrderType::Limit {
+                tif: TimeInForce::Gtc,
+            },
+            client_id: None,
+            commission: None,
+        });
+        prepare_group(vec![order], &acct, Some(&acct), Some(nonce))
+            .map_err(|e| eyre::eyre!("prepare: {e:?}"))
+    };
+
+    // (mod, açıklama) — her biri cüzdana verilecek farklı bayt.
+    let modes = [
+        ("raw", "message_bytes (KONTROL — cüzdan bunu reddediyor)"),
+        ("base58", "utf8(base58(message_bytes))"),
+        ("base64", "utf8(base64(message_bytes))"),
+    ];
+
+    for (i, (mode, desc)) in modes.iter().enumerate() {
+        let nonce = now_ms + i as u64; // her mod taze nonce (dedup nonce'a bakıyor, §8.11)
+        let p = make(nonce)?;
+        let content: Vec<u8> = match *mode {
+            "raw" => p.message_bytes.clone(),
+            "base58" => p.message_base58().into_bytes(),
+            "base64" => p.message_base64().into_bytes(),
+            _ => unreachable!(),
+        };
+        let signature = sk.sign_message(&content).to_string();
+        let body = serde_json::json!({
+            "actions": p.actions, "nonce": p.nonce,
+            "account": p.account, "signer": p.signer, "signature": signature,
+        });
+        let resp = reqwest::Client::new()
+            .post(format!("{api_url}/order"))
+            .header("x-bulk-sig-mode", *mode)
+            .json(&body)
+            .send()
+            .await?;
+        let st = resp.status();
+        let txt = resp.text().await?;
+        let bad = txt.to_lowercase().contains("bad signature");
+        let kisa: String = txt.chars().take(220).collect();
+        println!("\n=== mode='{mode}'  ({desc}) ===");
+        println!("HTTP {st} | {kisa}");
+        println!(
+            ">>> imza: {}",
+            if bad {
+                "❌ REDDEDİLDİ (bad signature)"
+            } else {
+                "✅ KABUL — server imzayı doğruladı, bu mod cüzdanla kullanılabilir"
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Temizlik: modlar book'a resting limit bıraktıysa sil (raw KcSigner yolu hep çalışıyor).
+    println!("\n=== temizlik (cxa) ===");
+    let mut signer = KcSigner::new(kc);
+    let _ = gonder_items(
+        api_url,
+        &mut signer,
+        vec![OrderItem::CancelAll(CancelAll::all())],
+    )
+    .await?;
+    println!("resting limitler iptal edildi");
+
+    Ok(())
 }
 
 /// S6 — Nonce'un ömrü var mı? Ön-imzalı tx tasarımı buna bağlı.
