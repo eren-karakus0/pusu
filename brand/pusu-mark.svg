@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100" role="img" aria-label="PUSU">
+  <title>PUSU — the watcher</title>
+  <line x1="6" y1="50" x2="94" y2="50" stroke="#cba24e" stroke-width="4" stroke-linecap="round"/>
+  <g fill="none" stroke="#ece3d2" stroke-width="6" stroke-linecap="round">
+    <path d="M20,50 C36,29 64,29 80,50"/>
+    <path d="M20,50 C36,71 64,71 80,50"/>
+    <circle cx="50" cy="50" r="10.5" stroke-width="4.5"/>
+  </g>
+  <circle cx="50" cy="50" r="4.4" fill="#e0bd72"/>
+</svg>
