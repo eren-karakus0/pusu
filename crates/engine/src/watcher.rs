@@ -88,6 +88,11 @@ pub struct Tick {
     pub invalidated: Vec<AlertId>,
     /// Kullanıcı defterdeki girişi iptal etti — ön-imzalı `cx` gönderildi.
     pub cancelled: Vec<AlertId>,
+    /// Bildirim alarmı ateşledi — koşul tuttu, kullanıcıya haber verilecek.
+    ///
+    /// Trade değil: emir yok, imza yok. Engine yalnızca ateşleyeni *raporlar*;
+    /// teslimi (in-app/e-posta/Telegram) node yapıyor — engine saf kalıyor.
+    pub notified: Vec<AlertId>,
     /// Çekilemeyen feed'ler. Boş değilse bu tur eksik değerlendirildi.
     pub feed_errors: Vec<String>,
 }
@@ -190,6 +195,16 @@ impl<K: KlineSource, M: MarkSource, O: OrderSource, D: Dispatch> Watcher<K, M, O
             if bayat {
                 alert.state = AlertState::Missed;
                 tick.missed.push(alert.id.clone());
+                continue;
+            }
+
+            // Bildirim alarmı: emir yok, imza yok — koşul tuttu, haber ver ve bitir.
+            // Dispatch emir-odaklı (ön-imzalı blob bekler); Notify'ı oraya sokmak
+            // NoBlob → Uncertain'a düşürür (kullanıcı kayıp bir işlem sanır). Tek
+            // atışlık: Fired terminal, tekrar ateşlemez.
+            if matches!(alert.action, AlertAction::Notify) {
+                alert.state = AlertState::Fired;
+                tick.notified.push(alert.id.clone());
                 continue;
             }
 
@@ -543,6 +558,26 @@ mod tests {
     }
 
     // -- testler ------------------------------------------------------------
+
+    #[tokio::test]
+    async fn bildirim_alarmi_notified_uretir_emir_gondermez() {
+        // Notify: koşul tutunca HABER VER, emir gönderme. Eski bug: Notify
+        // dispatch'e düşüp NoBlob → Uncertain oluyordu (kullanıcı kayıp işlem sanır).
+        let armed = 10_800_000;
+        let kapanis = armed + 1_800_000; // alarmdan sonra kapanan mum
+        let kaynak = SahteKline(RefCell::new(vec![mum(kapanis, 90_500.0)]));
+        let borsa = SahteBorsa::new(dolu_yanit());
+        let mut w = Watcher::new(kaynak, SahteMark(90_500.0), SahteEmirler::bos(), borsa);
+
+        let mut alerts = vec![alarm(armed)];
+        alerts[0].action = AlertAction::Notify;
+
+        let t = w.tick(&mut alerts, kapanis + 60_000).await;
+
+        assert_eq!(t.notified, vec![AlertId::new("a1")], "notified'a düşmeli");
+        assert!(t.fired.is_empty(), "bildirim emir raporu üretmez");
+        assert_eq!(alerts[0].state, AlertState::Fired, "tek atışlık, terminal");
+    }
 
     #[tokio::test]
     async fn kullanicinin_senaryosu_uctan_uca() {
