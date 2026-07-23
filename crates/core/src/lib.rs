@@ -28,10 +28,12 @@
 
 pub mod alert;
 pub mod condition;
+pub mod kline;
 pub mod market;
 
 pub use alert::{
     Alert, AlertAction, AlertId, AlertState, Entry, ExitLeg, Exits, TradeSpec, BUILDER_FEE_BPS,
 };
 pub use condition::{Condition, Execution, WatchReason};
+pub use kline::{last_closed, Kline};
 pub use market::{Cross, Interval, Side, Symbol};

@@ -129,25 +129,25 @@ impl Interval {
         }
     }
 
-    /// Kullanıcıya gösterilecek Türkçe ad.
+    /// Kullanıcıya gösterilecek ad (arayüz İngilizce).
     pub const fn label(&self) -> &'static str {
         match self {
-            Self::S10 => "10 saniyelik",
-            Self::M1 => "1 dakikalık",
-            Self::M3 => "3 dakikalık",
-            Self::M5 => "5 dakikalık",
-            Self::M15 => "15 dakikalık",
-            Self::M30 => "30 dakikalık",
-            Self::H1 => "saatlik",
-            Self::H2 => "2 saatlik",
-            Self::H4 => "4 saatlik",
-            Self::H6 => "6 saatlik",
-            Self::H8 => "8 saatlik",
-            Self::H12 => "12 saatlik",
-            Self::D1 => "günlük",
-            Self::D3 => "3 günlük",
-            Self::W1 => "haftalık",
-            Self::Mo1 => "aylık",
+            Self::S10 => "10-second",
+            Self::M1 => "1-minute",
+            Self::M3 => "3-minute",
+            Self::M5 => "5-minute",
+            Self::M15 => "15-minute",
+            Self::M30 => "30-minute",
+            Self::H1 => "hourly",
+            Self::H2 => "2-hour",
+            Self::H4 => "4-hour",
+            Self::H6 => "6-hour",
+            Self::H8 => "8-hour",
+            Self::H12 => "12-hour",
+            Self::D1 => "daily",
+            Self::D3 => "3-day",
+            Self::W1 => "weekly",
+            Self::Mo1 => "monthly",
         }
     }
 }

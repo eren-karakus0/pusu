@@ -170,6 +170,51 @@ impl Condition {
             }
         }
     }
+
+    /// Kısa, insan-okur özet — bildirim metni ve UI için tek satır.
+    ///
+    /// Örn. `BTC-USD · mark > 90000`, `BTC-USD · 1-hour close < 88000`.
+    pub fn summary(&self) -> String {
+        fn px(p: f64) -> String {
+            if p.fract() == 0.0 {
+                format!("{p:.0}")
+            } else {
+                format!("{p}")
+            }
+        }
+        fn arrow(c: Cross) -> &'static str {
+            match c {
+                Cross::Above => ">",
+                Cross::Below => "<",
+            }
+        }
+        match self {
+            Self::MarkCross {
+                symbol,
+                cross,
+                price,
+            } => format!(
+                "{} · mark {} {}",
+                symbol.as_str(),
+                arrow(*cross),
+                px(*price)
+            ),
+            Self::CandleClose {
+                symbol,
+                interval,
+                cross,
+                price,
+            } => format!(
+                "{} · {} close {} {}",
+                symbol.as_str(),
+                interval.label(),
+                arrow(*cross),
+                px(*price)
+            ),
+            Self::All(_) => "multi-condition (all must hold)".to_string(),
+            Self::Any(_) => "multi-condition (any must hold)".to_string(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -286,5 +331,21 @@ mod tests {
     fn onchain_gerekce_dondurmez() {
         // Açıklanması gereken şey, bir alarmın neden BİZE bağımlı olduğu.
         assert_eq!(mark(88_400.0).execution().explain(), None);
+    }
+
+    #[test]
+    fn ozet_okunur_tek_satir_verir() {
+        assert_eq!(mark(88_400.0).summary(), "BTC-USD · mark < 88400");
+        assert_eq!(
+            candle(Interval::H1).summary(),
+            "BTC-USD · hourly close > 90000"
+        );
+        // Ondalık koru, tam sayıda basma.
+        let frac = Condition::MarkCross {
+            symbol: "SOL-USD".into(),
+            cross: Cross::Above,
+            price: 198.5,
+        };
+        assert_eq!(frac.summary(), "SOL-USD · mark > 198.5");
     }
 }
