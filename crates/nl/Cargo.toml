@@ -1,0 +1,17 @@
+[package]
+name = "pusu-nl"
+version = "0.1.0"
+description = "Doğal dil alarm derleyici: bir cümleyi PUSU alarm taslağına (koşul + iş + iptal) çevirir"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+pusu-core = { path = "../core" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+pusu-compile = { path = "../compile" }
+bulk-keychain.workspace = true

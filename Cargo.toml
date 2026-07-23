@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/api", "crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/node", "crates/sign", "crates/spike", "crates/store", "crates/web"]
+members = ["crates/api", "crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/nl", "crates/node", "crates/sign", "crates/spike", "crates/store", "crates/web"]
 # pusu-web yalnızca wasm hedefine derlenir (web-sys/wasm-bindgen host'ta olmaz).
 # Çıplak `cargo build`/`test`/`clippy` onu atlasın diye default-members'tan hariç;
 # CI ayrı bir wasm adımıyla derliyor.
-default-members = ["crates/api", "crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/node", "crates/sign", "crates/spike", "crates/store"]
+default-members = ["crates/api", "crates/compile", "crates/core", "crates/engine", "crates/feed", "crates/nl", "crates/node", "crates/sign", "crates/spike", "crates/store"]
 
 [workspace.package]
 edition = "2021"
