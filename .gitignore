@@ -1,6 +1,9 @@
 /target
 **/*.rs.bk
 
+# Web build çıktısı (trunk) — üretilen artefakt, kaynak değil
+/crates/web/dist
+
 # Spike anahtarları — staging test key'leri, asla commit edilmez
 spike-keys.json
 *-keys.json
