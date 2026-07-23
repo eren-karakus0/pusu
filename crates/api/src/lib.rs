@@ -49,14 +49,26 @@ pub struct BlobIn {
 /// Router'ı kur. `store` state olarak paylaşılıyor.
 pub fn router(store: Store) -> Router {
     Router::new()
-        .route("/health", get(|| async { "ok" }))
+        .route("/health", get(health))
         .route("/alerts", post(create_alert).get(list_alerts))
         .route("/alerts/{id}/cancel", post(cancel_alert))
         .route("/alerts/{id}", delete(dismiss_alert))
+        .route("/notifications", get(notifications))
+        .route("/notifications/read", post(read_notifications))
+        .route("/contact", post(set_contact).get(get_contact))
         // Tarayıcı farklı origin'den çağırıyor. Staging'de gevşek; prod'da
         // frontend origin'ine daraltılacak.
         .layer(CorsLayer::permissive())
         .with_state(store)
+}
+
+/// DB'yi de yoklayan health-check. Statik "ok" yerine gerçek bir `SELECT 1` —
+/// Postgres düşükken sağlıklı görünmek, sessizce alarm kaybetmenin yoludur.
+async fn health(State(store): State<Store>) -> impl IntoResponse {
+    match store.ping().await {
+        Ok(()) => (StatusCode::OK, "ok"),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "db unavailable"),
+    }
 }
 
 /// Sahip doğrulaması için ortak sorgu — `?owner=<pubkey>`.
@@ -138,6 +150,88 @@ async fn dismiss_alert(
         .audit(&aid, "dismissed", &json!({ "via": "api" }))
         .await?;
     Ok(Json(json!({ "id": aid.as_str(), "deleted": true })).into_response())
+}
+
+/// `GET /notifications?owner=` — kullanıcının son bildirimleri + okunmamış sayısı.
+///
+/// Notify alarmları koşulu tuttuğunda watcher outbox'a yazıyor; burası onları
+/// uygulama-içi zil için sunuyor. Auth notu `list_alerts` ile aynı: owner pubkey
+/// zaten public, gerçek imza-tabanlı auth Faz 4.
+async fn notifications(
+    State(store): State<Store>,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let items = store.list_notifications(&q.owner, 50).await?;
+    let unread = store.unread_count(&q.owner).await?;
+    Ok(Json(json!({ "notifications": items, "unread": unread })).into_response())
+}
+
+/// `POST /notifications/read?owner=` — okunmamışları okundu işaretle. İşaretlenen sayı.
+async fn read_notifications(
+    State(store): State<Store>,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let marked = store.mark_notifications_read(&q.owner).await?;
+    Ok(Json(json!({ "marked": marked })).into_response())
+}
+
+/// İletişim kanalı ayarlama isteği. Boş/eksik alan = değiştirme.
+#[derive(Debug, Deserialize)]
+pub struct SetContact {
+    owner: String,
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(default)]
+    telegram: Option<String>,
+}
+
+/// `POST /contact` — Notify bildirimleri için e-posta / telegram ayarla.
+///
+/// Boş string → `None` (o alanı değiştirme; store `COALESCE` ile koruyor).
+/// E-posta kaba doğrulanıyor (`@` + uzunluk); asıl doğrulama zaten teslimde
+/// (geçersizse Resend reddeder), ama açık çöpü baştan eleyelim.
+async fn set_contact(
+    State(store): State<Store>,
+    Json(req): Json<SetContact>,
+) -> Result<Response, ApiError> {
+    if req.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let clean = |o: &Option<String>| {
+        o.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let email = clean(&req.email);
+    let telegram = clean(&req.telegram);
+    if let Some(e) = &email {
+        if !e.contains('@') || e.len() > 254 {
+            return Err(ApiError::bad("geçersiz e-posta"));
+        }
+    }
+    store
+        .set_contact(&req.owner, email.as_deref(), telegram.as_deref())
+        .await?;
+    Ok(Json(json!({ "ok": true })).into_response())
+}
+
+/// `GET /contact?owner=` — ayarlı e-posta / telegram (prefill için).
+async fn get_contact(
+    State(store): State<Store>,
+    Query(q): Query<OwnerQuery>,
+) -> Result<Response, ApiError> {
+    if q.owner.trim().is_empty() {
+        return Err(ApiError::bad("owner gerekli"));
+    }
+    let (email, telegram) = store.get_contact(&q.owner).await?;
+    Ok(Json(json!({ "email": email, "telegram": telegram })).into_response())
 }
 
 async fn create_alert(
