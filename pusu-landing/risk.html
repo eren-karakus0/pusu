@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="index,follow">
+<meta name="description" content="PUSU Risk Disclosure — the material risks of trading and of using automated, non-custodial tools on BULK.">
+<meta name="theme-color" content="#140f0a">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDAgMTAwIiB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJQVVNVIj4KICA8bGluZSB4MT0iNi4yNSIgeTE9IjUwIiB4Mj0iOTMuNzUiIHkyPSI1MCIgc3Ryb2tlPSIjY2JhMjRlIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxjaXJjbGUgY3g9IjUwIiBjeT0iNTAiIHI9IjMwIiBmaWxsPSJub25lIiBzdHJva2U9IiNlY2UzZDIiIHN0cm9rZS13aWR0aD0iNSIvPgogIDxsaW5lIHgxPSI1MCIgeTE9IjcuNSIgeDI9IjUwIiB5Mj0iMjMuNzUiIHN0cm9rZT0iI2VjZTNkMiIgc3Ryb2tlLXdpZHRoPSI1IiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8bGluZSB4MT0iNTAiIHkxPSI3Ni4yNSIgeDI9IjUwIiB5Mj0iOTIuNSIgc3Ryb2tlPSIjZWNlM2QyIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgogIDxjaXJjbGUgY3g9IjUwIiBjeT0iNTAiIHI9IjguNSIgZmlsbD0iI2UwYmQ3MiIvPgo8L3N2Zz4K">
+<title>Risk Disclosure — PUSU</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  :root{
+    --bg:#140f0a; --bg2:#1b140d; --ink:#f6efe0; --ink-soft:#ddd1b9; --muted:#b3a488;
+    --gold:#cba24e; --gold-hi:#e0bd72; --line:#3a2e1f; --warn:#e08a4e;
+    --serif:"Instrument Serif","Iowan Old Style","Palatino Linotype",Georgia,serif;
+    --mono:"SF Mono","Cascadia Code",ui-monospace,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  html{scroll-behavior:smooth;}
+  body{
+    background:radial-gradient(120% 90% at 50% -10%, rgba(203,162,78,.08), transparent 60%), var(--bg);
+    color:var(--ink-soft); font-family:var(--sans); font-size:17.5px; line-height:1.72;
+    font-weight:420; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  }
+  a{color:var(--gold-hi); text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  .nav{
+    position:sticky; top:0; z-index:10; backdrop-filter:blur(12px);
+    background:linear-gradient(180deg,rgba(20,15,10,.85),rgba(20,15,10,.5));
+    border-bottom:1px solid var(--line);
+  }
+  .nav-in{max-width:900px; margin:0 auto; padding:0 26px; height:60px; display:flex; align-items:center; justify-content:space-between;}
+  .brand{font-family:var(--serif); font-size:22px; letter-spacing:.32em; color:var(--gold-hi); display:inline-flex; align-items:center; gap:11px;}
+  .brand svg{width:21px; height:21px;}
+  .back{font-family:var(--mono); font-size:12.5px; letter-spacing:.06em; color:var(--ink-soft);}
+  main{max-width:740px; margin:0 auto; padding:64px 26px 96px;}
+  .eyebrow{font-family:var(--mono); font-size:12px; letter-spacing:.22em; text-transform:uppercase; color:var(--gold); margin-bottom:16px;}
+  h1{font-family:var(--serif); font-weight:400; font-size:clamp(40px,7vw,60px); line-height:1.02; color:var(--ink); margin-bottom:14px; letter-spacing:-.5px;}
+  .updated{font-family:var(--mono); font-size:13px; color:var(--muted); margin-bottom:14px;}
+  .lede{font-size:19px; color:var(--ink-soft); line-height:1.6; margin-bottom:40px;}
+  .note{
+    background:var(--bg2); border:1px solid var(--line); border-left:3px solid var(--warn);
+    border-radius:12px; padding:16px 18px; margin-bottom:44px; color:var(--ink); font-size:15.5px;
+  }
+  .note strong{color:var(--gold-hi);}
+  h2{font-family:var(--serif); font-weight:400; font-size:28px; color:var(--gold-hi); margin:44px 0 12px; line-height:1.15;}
+  h2 .n{font-family:var(--mono); font-size:14px; color:var(--muted); margin-right:12px; vertical-align:middle;}
+  p{margin:0 0 15px; color:var(--ink-soft);}
+  strong{color:var(--ink); font-weight:600;}
+  ul{margin:0 0 15px; padding-left:22px; color:var(--ink-soft);}
+  li{margin:0 0 8px;}
+  hr{border:0; border-top:1px solid var(--line); margin:48px 0;}
+  footer{max-width:740px; margin:0 auto; padding:0 26px 70px; color:var(--muted); font-size:13.5px; display:flex; gap:20px; flex-wrap:wrap;}
+  footer a{color:var(--muted);}
+  .reticle{color:var(--gold-hi);}
+</style>
+</head>
+<body>
+  <nav class="nav"><div class="nav-in">
+    <a class="brand" href="/">
+      <svg class="reticle" viewBox="0 0 40 40" aria-hidden="true">
+        <line x1="2.5" y1="20" x2="37.5" y2="20" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="20" cy="20" r="12" fill="none" stroke="currentColor" stroke-width="2"/>
+        <circle cx="20" cy="20" r="3.4" fill="currentColor"/>
+        <line x1="20" y1="3" x2="20" y2="9.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <line x1="20" y1="30.5" x2="20" y2="37" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>PUSU
+    </a>
+    <a class="back" href="/">← Back to site</a>
+  </div></nav>
+
+  <main>
+    <div class="eyebrow">Legal</div>
+    <h1>Risk Disclosure</h1>
+    <p class="updated">Last updated: 24 July 2026</p>
+    <p class="lede">Trading leveraged crypto derivatives is high-risk, and automating it does not remove that risk. Read this before you use PUSU. It works alongside our <a href="/terms.html">Terms of Service</a>.</p>
+
+    <div class="note">
+      <strong>You can lose some or all of your funds — quickly.</strong> Only trade with money you can afford to lose entirely. Nothing here is financial advice.
+    </div>
+
+    <h2><span class="n">01</span>This is not advice</h2>
+    <p>PUSU is a tool, not an adviser. We do not recommend trades, tell you what to buy or sell, or promise any outcome. Every alert, size, and price is chosen by you. You are solely responsible for your decisions and their results.</p>
+
+    <h2><span class="n">02</span>You can lose everything</h2>
+    <p>Crypto assets are highly volatile. Prices can move sharply against you at any time, including outside your expectations. It is possible to lose your entire margin, and — depending on the product — losses can occur very quickly.</p>
+
+    <h2><span class="n">03</span>Leverage and liquidation</h2>
+    <p>Perpetual futures and similar leveraged products magnify both gains and losses. A small adverse price move can wipe out your position and <strong>liquidate</strong> your margin. Funding rates, fees, and slippage further reduce returns. Higher leverage means faster, larger losses.</p>
+
+    <h2><span class="n">04</span>Automation-specific risks</h2>
+    <p>Automating a trade introduces risks beyond ordinary trading:</p>
+    <ul>
+      <li><strong>Watcher downtime.</strong> Watched alerts depend on PUSU’s infrastructure. If our servers, the network, or a data feed are unavailable, an alert may fire late or not at all.</li>
+      <li><strong>Missed or false triggers.</strong> Data delays, gaps, or exchange issues can cause a condition to be missed, or to be met in a way you did not intend.</li>
+      <li><strong>Pre-signed staleness.</strong> An order you signed earlier may execute later under very different market conditions than when you set it.</li>
+      <li><strong>Orders that don’t fill.</strong> A limit entry may never fill; a resting order may sit on the book while the setup you wanted passes.</li>
+      <li><strong>Slippage and partial fills.</strong> Market orders may fill at a worse price than expected, and protective exits may fill partially or not at all in fast markets.</li>
+    </ul>
+
+    <h2><span class="n">05</span>Non-custodial responsibility</h2>
+    <p>PUSU never holds your funds or keys — which means <strong>you</strong> are responsible for them. If you lose your wallet, seed phrase, or device, or you sign a malicious transaction, your funds can be lost permanently and <strong>no one can recover them</strong>, including us.</p>
+
+    <h2><span class="n">06</span>Exchange and smart-contract risk</h2>
+    <p>Your trades execute on BULK, an independent third party. Exchange outages, bugs, smart-contract vulnerabilities, oracle failures, changes to their rules or fees, or their insolvency could cause loss or prevent you from acting. PUSU does not control the exchange and cannot guarantee its performance or security.</p>
+
+    <h2><span class="n">07</span>No guarantee of execution, timing, or price</h2>
+    <p>We do not guarantee that any alert will trigger, that any order will be submitted, accepted, or filled, or that execution will occur at a particular time or price. Best-effort automation is not a guaranteed stop-loss or take-profit.</p>
+
+    <h2><span class="n">08</span>Market gaps and volatility</h2>
+    <p>Markets can gap through your levels without trading at them. A stop set at a price may execute far worse, or your position may be liquidated before a protective order can act.</p>
+
+    <h2><span class="n">09</span>Regulatory and tax risk</h2>
+    <p>Laws around crypto, derivatives, and automated trading vary by jurisdiction and change over time. You are responsible for determining whether your use is lawful where you are and for any taxes on your activity. Access may be restricted or withdrawn in some regions.</p>
+
+    <h2><span class="n">10</span>Early software</h2>
+    <p>PUSU is new and evolving. It may contain bugs, change without notice, or be interrupted. Test with small size first and never rely on it as your only safeguard.</p>
+
+    <h2><span class="n">11</span>Do your own research</h2>
+    <p>Understand the product, the exchange, and each setup before you use it. If you are unsure whether trading or automation is appropriate for you, seek independent, licensed advice.</p>
+
+    <hr>
+    <p style="color:var(--muted); font-size:14px;">By using PUSU you acknowledge these risks. See also our <a href="/terms.html">Terms of Service</a>.</p>
+  </main>
+
+  <footer>
+    <a href="/">← Back to site</a>
+    <a href="/terms.html">Terms of Service</a>
+    <span style="margin-left:auto;">© 2026 PUSU</span>
+  </footer>
+</body>
+</html>
