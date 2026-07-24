@@ -941,7 +941,9 @@ async fn cmd_sign_offchain(api_url: &str) -> eyre::Result<()> {
 
     println!("\n=== yorum ===");
     println!("A ❌ (bad sig): offchain mod açık — B*'lerden ✅ olan action-line formatıdır.");
-    println!("A ✅ (kabul):   offchain header hâlâ yok sayılıyor — ekip staging'i açmamış olabilir.");
+    println!(
+        "A ✅ (kabul):   offchain header hâlâ yok sayılıyor — ekip staging'i açmamış olabilir."
+    );
 
     println!("\n=== temizlik (cxa) ===");
     let mut signer = KcSigner::new(kc);
