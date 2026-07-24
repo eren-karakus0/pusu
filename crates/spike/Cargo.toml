@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 bulk-client.workspace = true
 bulk-keychain.workspace = true
+pusu-sign = { path = "../sign" }
 tokio.workspace = true
 eyre.workspace = true
 serde.workspace = true

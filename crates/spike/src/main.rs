@@ -66,6 +66,8 @@ enum Command {
     SignModes,
     /// S15: x-bulk-sig-mode header'ı staging'de gerçekten uygulanıyor mu?
     SignDiag,
+    /// S16: offchain zarf modu artık aktif mi? (ekip "resolved" dedi) — Phantom çözümü.
+    SignOffchain,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -687,6 +689,7 @@ async fn main() -> eyre::Result<()> {
         Command::NonceReplay => cmd_nonce_replay(&cli.api_url).await,
         Command::SignModes => cmd_sign_modes(&cli.api_url).await,
         Command::SignDiag => cmd_sign_diag(&cli.api_url).await,
+        Command::SignOffchain => cmd_sign_offchain(&cli.api_url).await,
     }
 }
 
@@ -805,6 +808,149 @@ async fn cmd_sign_diag(api_url: &str) -> eyre::Result<()> {
         vec![OrderItem::CancelAll(CancelAll::all())],
     )
     .await?;
+    Ok(())
+}
+
+/// S16 — Offchain zarf modu staging'de artık aktif mi? (ekip "resolved" dedi)
+///
+/// Phantom `signMessage`'ın ham baytları reddetme sorununun çözümü offchain
+/// zarf (`0xff "solana offchain"` domain'li). Burada iki şeyi ayırıyoruz:
+///   A: raw baytları imzala + header 'offchain' → KABUL ise header hâlâ no-op;
+///      "bad signature" ise offchain mod AKTİF (artık zarf bekliyor).
+///   B*: offchain zarfı farklı action-line formatlarıyla imzala + header
+///      'offchain' → kabul edeni bulursak action-line formatı ampirik oturur.
+async fn cmd_sign_offchain(api_url: &str) -> eyre::Result<()> {
+    use bulk_keychain::{
+        prepare_group, CancelAll, Keypair as KcKeypair, Order, OrderItem, OrderType,
+        PreparedMessage, Signer as KcSigner, TimeInForce,
+    };
+    use solana_signer::Signer as _;
+
+    let keys = load_or_create_keys()?;
+    let c = client(api_url, &keys.master)?;
+    let px = c.get_ticker("BTC-USD").await?.mark_price;
+    let kc = KcKeypair::from_base58(&keys.master).map_err(|e| eyre::eyre!("{e:?}"))?;
+    let acct = kc.pubkey();
+    let acct_b58 = acct.to_base58();
+    let sk = solana_keypair::Keypair::from_base58_string(&keys.master);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis() as u64;
+    let limit_px = (px * 0.80 * 100.0).round() / 100.0;
+    println!("BTC mark: {px} | hesap/signer: {acct_b58}");
+
+    let make = |nonce: u64| -> eyre::Result<PreparedMessage> {
+        let order = OrderItem::Order(Order {
+            symbol: "BTC-USD".into(),
+            is_buy: true,
+            price: limit_px,
+            size: 0.001,
+            reduce_only: false,
+            iso: false,
+            order_type: OrderType::Limit {
+                tif: TimeInForce::Gtc,
+            },
+            client_id: None,
+            commission: None,
+        });
+        prepare_group(vec![order], &acct, Some(&acct), Some(nonce))
+            .map_err(|e| eyre::eyre!("prepare: {e:?}"))
+    };
+
+    let post = |sig: String, p: &PreparedMessage| {
+        let body = serde_json::json!({
+            "actions": p.actions, "nonce": p.nonce,
+            "account": p.account, "signer": p.signer, "signature": sig,
+        });
+        let url = format!("{api_url}/order");
+        async move {
+            let resp = reqwest::Client::new()
+                .post(url)
+                .header("x-bulk-sig-mode", "offchain")
+                .json(&body)
+                .send()
+                .await?;
+            let st = resp.status();
+            let txt = resp.text().await?;
+            eyre::Ok((st, txt))
+        }
+    };
+
+    // --- A: raw baytları + header offchain (mod aktif mi ayırıcı) ---
+    {
+        let p = make(now_ms)?;
+        let sig = sk.sign_message(&p.message_bytes).to_string();
+        let (st, txt) = post(sig, &p).await?;
+        let bad = txt.to_lowercase().contains("bad signature");
+        println!("\n=== A: raw baytlar + header offchain ===");
+        println!("HTTP {st} | {}", txt.chars().take(220).collect::<String>());
+        println!(
+            ">>> {}",
+            if bad {
+                "❌ bad signature ⇒ OFFCHAIN MOD AKTİF (artık zarf bekliyor)"
+            } else {
+                "✅ kabul ⇒ offchain header HÂLÂ NO-OP (server raw doğruluyor)"
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // --- B*: offchain zarf, farklı action-line formatları ---
+    // Format bilinmiyor; birkaç makul aday deniyoruz. Kabul eden = doğru format.
+    let p0 = make(now_ms + 100)?;
+    let compact: Vec<String> = p0
+        .actions
+        .iter()
+        .map(|a| serde_json::to_string(a).unwrap_or_default())
+        .collect();
+    let variants: Vec<(&str, Vec<String>)> = vec![
+        ("bos (yalniz baslik)", vec![]),
+        ("compact-json/action", compact.clone()),
+        (
+            "human: 'Limit Buy 0.001 BTC-USD'",
+            vec![format!("Limit Buy 0.001 BTC-USD @ {limit_px}")],
+        ),
+    ];
+
+    for (i, (label, lines)) in variants.into_iter().enumerate() {
+        let nonce = now_ms + 200 + i as u64;
+        let p = make(nonce)?;
+        let env = pusu_sign::offchain::build_envelope(
+            &p.message_bytes,
+            &acct_b58,
+            p.nonce,
+            &acct_b58,
+            &lines,
+        )
+        .map_err(|e| eyre::eyre!("zarf: {e:?}"))?;
+        let sig = sk.sign_message(&env).to_string();
+        let (st, txt) = post(sig, &p).await?;
+        let bad = txt.to_lowercase().contains("bad signature");
+        println!("\n=== B{i}: offchain zarf / action-line = {label} ===");
+        println!("HTTP {st} | {}", txt.chars().take(220).collect::<String>());
+        println!(
+            ">>> {}",
+            if bad {
+                "❌ bad signature"
+            } else {
+                "✅ imza KABUL 🎉 (bu format tutuyor)"
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    println!("\n=== yorum ===");
+    println!("A ❌ (bad sig): offchain mod açık — B*'lerden ✅ olan action-line formatıdır.");
+    println!("A ✅ (kabul):   offchain header hâlâ yok sayılıyor — ekip staging'i açmamış olabilir.");
+
+    println!("\n=== temizlik (cxa) ===");
+    let mut signer = KcSigner::new(kc);
+    let _ = gonder_items(
+        api_url,
+        &mut signer,
+        vec![OrderItem::CancelAll(CancelAll::all())],
+    )
+    .await;
     Ok(())
 }
 

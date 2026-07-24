@@ -3737,6 +3737,7 @@ dependencies = [
  "bulk-keychain",
  "clap",
  "eyre",
+ "pusu-sign",
  "reqwest",
  "serde",
  "serde_json",
