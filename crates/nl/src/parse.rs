@@ -114,6 +114,29 @@ const KNOWN: &[&str] = &[
     "inj", "ltc", "bch", "ftm", "atom", "pepe", "wif", "bonk", "jto", "rndr", "ena", "ordi",
 ];
 
+/// Tam coin adını ticker'a indirger: "bitcoin" → "btc". Tam ad güçlü bir
+/// sinyal (kelimeyle çakışmaz), bu yüzden KNOWN'da olmasa bile kabul ediyoruz —
+/// kullanıcı çoğu zaman "bitcoin"/"ethereum" yazıyor, "btc"/"eth" değil.
+fn coin_alias(w: &str) -> Option<&'static str> {
+    Some(match w {
+        "bitcoin" => "btc",
+        "ethereum" | "ether" => "eth",
+        "solana" => "sol",
+        "ripple" => "xrp",
+        "dogecoin" => "doge",
+        "cardano" => "ada",
+        "avalanche" => "avax",
+        "litecoin" => "ltc",
+        "polygon" => "matic",
+        "arbitrum" => "arb",
+        "chainlink" => "link",
+        "injective" => "inj",
+        "fantom" => "ftm",
+        "cosmos" => "atom",
+        _ => return None,
+    })
+}
+
 /// Bir kelimeyi `BASE-QUOTE` sembolüne çöz. Dönüş: (sembol, quote_varsayıldı_mı).
 /// `$` öneki güçlü ticker sinyali — bilinmeyen tabanı bile kabul ederiz.
 fn resolve_symbol(word: &str) -> Option<(String, bool)> {
@@ -121,6 +144,11 @@ fn resolve_symbol(word: &str) -> Option<(String, bool)> {
     let w = word.strip_prefix('$').unwrap_or(word);
     if w.is_empty() {
         return None;
+    }
+
+    // Tam coin adı ("bitcoin") → ticker. Ad güçlü sinyal; KNOWN kontrolünü atlar.
+    if let Some(ticker) = coin_alias(w) {
+        return Some((format!("{}-USD", ticker.to_uppercase()), true));
     }
 
     if let Some((base, quote)) = w.split_once('-') {
@@ -209,7 +237,8 @@ fn find_interval(toks: &[Tok]) -> Option<(Interval, Option<usize>)> {
 
 const ABOVE: &[&str] = &[
     "above", "over", "exceeds", "exceed", "greater", ">", ">=", "up", "out", "rises", "rise",
-    "climbs", "climb", "pumps", "pump", "reclaims", "reclaim", "breakout",
+    "climbs", "climb", "pumps", "pump", "reclaims", "reclaim", "breakout", "surges", "surge",
+    "spikes", "spike", "jumps", "jump", "tops",
 ];
 const BELOW: &[&str] = &[
     "below",
@@ -228,6 +257,12 @@ const BELOW: &[&str] = &[
     "loses",
     "lose",
     "breakdown",
+    "dumps",
+    "dump",
+    "sinks",
+    "sink",
+    "tanks",
+    "tank",
 ];
 
 enum CrossFind {
@@ -631,6 +666,29 @@ mod tests {
         // İngilizce kelimeyle karışanlar açık yazım ister.
         assert_eq!(resolve_symbol("near"), None);
         assert_eq!(resolve_symbol("link"), None);
+    }
+
+    #[test]
+    fn coin_tam_adlari_cozulur() {
+        // Kullanıcılar çoğu zaman tam ad yazıyor.
+        assert_eq!(resolve_symbol("bitcoin"), Some(("BTC-USD".into(), true)));
+        assert_eq!(resolve_symbol("ethereum"), Some(("ETH-USD".into(), true)));
+        assert_eq!(resolve_symbol("solana"), Some(("SOL-USD".into(), true)));
+        // Kelimeyle çakışan "link", tam ad "chainlink" ile güvenle çözülür.
+        assert_eq!(resolve_symbol("chainlink"), Some(("LINK-USD".into(), true)));
+        // Kısa ticker hâlâ çalışıyor.
+        assert_eq!(resolve_symbol("btc"), Some(("BTC-USD".into(), true)));
+    }
+
+    #[test]
+    fn yon_kelimeleri_simetrik() {
+        // Eklenen yukarı/aşağı ifadeleri doğru yöne çözülüyor.
+        let up = super::super::lex::tokenize("surges past 90k");
+        assert!(matches!(find_cross(&up), CrossFind::One(Cross::Above)));
+        let down = super::super::lex::tokenize("dumps under 88k");
+        assert!(matches!(find_cross(&down), CrossFind::One(Cross::Below)));
+        let sink = super::super::lex::tokenize("sinks below 3000");
+        assert!(matches!(find_cross(&sink), CrossFind::One(Cross::Below)));
     }
 
     #[test]

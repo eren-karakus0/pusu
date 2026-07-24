@@ -300,6 +300,21 @@ mod tests {
     }
 
     #[test]
+    fn tam_coin_adi_ve_yeni_yon_kelimesi() {
+        // "bitcoin" (tam ad) + "dumps" (yeni aşağı ifadesi) uçtan uca çalışmalı.
+        let p = parse("notify me when bitcoin dumps below 60k").unwrap();
+        assert_eq!(
+            p.draft.condition,
+            Condition::MarkCross {
+                symbol: "BTC-USD".into(),
+                cross: Cross::Below,
+                price: 60_000.0,
+            }
+        );
+        assert_eq!(p.draft.action, AlertAction::Notify);
+    }
+
+    #[test]
     fn eksik_miktar_hatasi() {
         assert_eq!(
             parse("long BTC when it closes above $90k"),
