@@ -13,7 +13,7 @@ use wasm_bindgen_futures::spawn_local;
 
 use crate::account::AccountPanel;
 use crate::alert::{self, Placed};
-use crate::chart::{CandleChart, ChartHandle, DrawTools};
+use crate::chart::{CandleChart, ChartHandle};
 use crate::{api, config, onboarding, wallet};
 
 #[derive(Clone)]
@@ -1180,14 +1180,13 @@ fn Dashboard(master: String, sub: String) -> impl IntoView {
 
     let owner = master.clone();
     let trigger = Signal::derive(move || num(&price.get()));
-    // Grafik + sol çizim rayı aynı motor handle'ını paylaşır.
+    // Grafik motoru handle'ı (setData / eşik çizgisi / indikatör çağrıları).
     let chart_handle = ChartHandle::new();
 
     view! {
         <div class="terminal">
             <TopBar symbol interval mark markets owner=master.clone() sub=sub.clone() />
             <div class="term-body">
-                <DrawTools handle=chart_handle.clone() />
                 <main class="term-main">
                     <div class="term-chart">
                         <CandleChart symbol interval trigger=trigger handle=chart_handle.clone() />
