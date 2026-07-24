@@ -13,3 +13,6 @@ spike-keys.json
 # Araştırma notları — ekibe raporlanana kadar lokal
 # (bulk-client'ın raporlanmamış bug'larını ve rekabet avantajı olan bulguları içeriyor)
 docs/research/
+
+# App static deploy çıktısı (Vercel) — üretilen
+/pusu-app
