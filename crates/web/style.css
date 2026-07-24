@@ -946,11 +946,24 @@ body {
 
 /* dar ekran: tek kolon, grafik sabit yükseklik */
 @media (max-width: 900px) {
-  .terminal { position: static; min-height: 100vh; }
+  .terminal { position: static; min-height: 100vh; overflow-x: hidden; }
   .term-body { grid-template-columns: 1fr; }
   .term-chart { height: 300px; flex: none; }
   .term-panel { border-left: 0; border-top: 1px solid var(--line); }
-  .tb-ivs { display: none; }
+  /* Üst bar tek satıra sığmıyor → sar. Böylece sayfa yatay taşmaz ve
+     alttaki hesap paneli de kırpılmaz. */
+  .topbar {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    padding: 10px 14px;
+  }
+  .tb-price { font-size: 18px; }
+  /* dekoratif hesap anahtarını dar ekranda gizle — yer açar, zil+LIVE kalır */
+  .tb-key { display: none; }
+  /* hesap tile etiketleri dar tile'a tam sığsın (OPEN ORDERS kırpılmasın) */
+  .acct-k { font-size: 9px; letter-spacing: 0.05em; }
+  .acct-tile { padding: 10px 10px 11px; }
 }
 
 @media (max-width: 420px) {
